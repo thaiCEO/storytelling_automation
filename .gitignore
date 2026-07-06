@@ -1,0 +1,22 @@
+# secrets
+.env
+
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# node / nuxt
+node_modules/
+.nuxt/
+.output/
+dist/
+
+# runtime artifacts
+stories/
+!stories/.gitkeep
+
+# misc
+.DS_Store
+Thumbs.db

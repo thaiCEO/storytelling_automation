@@ -1,0 +1,10 @@
+[
+  {
+    "scene_id": 1,
+    "path": "images/scene_001.png",
+    "prompt": "wide shot of glass towers, wet streets, distant neon, night, clear, set in a rain-dark future city, photorealistic cinematic film still, shot on 35mm, shallow depth of field, natural skin texture, moody film lighting, film grain, key subject centered, comfortable headroom, nothing important at top or bottom edges",
+    "model": "gpt-image-2",
+    "aspect": "3:2",
+    "attempts": 1
+  }
+]
