@@ -38,12 +38,26 @@ def test_xai_tts_payload_preserves_custom_voice_id(monkeypatch):
     assert payload["voice_id"] == "customVoice_ABC"
 
 
-def test_elevenlabs_payload_keeps_provider_options(monkeypatch):
-    monkeypatch.setattr(settings, "tts_model", "elevenlabs-v3")
+def test_elevenlabs_v3_payload_matches_atlas_schema(monkeypatch):
+    monkeypatch.setattr(settings, "tts_model", "elevenlabs/v3/text-to-speech")
+    monkeypatch.setattr(settings, "tts_voice_id_male", "iP95p4xoKVk53GoZ742B")
 
-    payload = build_tts_payload("Hello world", "Jessica")
+    payload = build_tts_payload("Hello world", resolve_voice_id("male"))
 
-    assert payload["model"] == "elevenlabs-v3"
-    assert payload["voice"] == "Jessica"
-    assert payload["output_format"] == "mp3_44100_128"
-    assert payload["stability"] == 0.5
+    # Atlas elevenlabs/v3 schema: ONLY these params — similarity_boost,
+    # speed, output_format and language are rejected/ignored
+    assert payload == {
+        "model": "elevenlabs/v3/text-to-speech",
+        "text": "Hello world",
+        "voice": "iP95p4xoKVk53GoZ742B",   # Chris — internal id, not the name
+        "stability": 0.5,
+        "apply_text_normalization": "auto",
+    }
+
+
+def test_elevenlabs_v3_second_voice_slot_is_adam(monkeypatch):
+    monkeypatch.setattr(settings, "tts_model", "elevenlabs/v3/text-to-speech")
+    monkeypatch.setattr(settings, "tts_voice_id_female", "pNInz6obpgDQGcFmaJgB")
+
+    payload = build_tts_payload("Hello world", resolve_voice_id("female"))
+    assert payload["voice"] == "pNInz6obpgDQGcFmaJgB"  # Adam (Male, en-US)

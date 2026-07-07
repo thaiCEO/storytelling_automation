@@ -20,10 +20,29 @@ ALLOWED_AUDIO_TAGS = {"[whispers]", "[excited]", "[sad]", "[pause]", "[intense]"
 
 
 RefKind = Literal["character", "location", "object"]
-# "front" is the MASTER IDENTITY image — the one shown in the UI box and
-# stored as the asset's reference_image_url. Other views (side/back/pose/
-# expression) are extra consistency references for the image pipeline.
-RefView = Literal["front", "side", "back", "pose", "expression"]
+# "ref_front" is the MASTER IDENTITY image — the one shown in the UI box and
+# stored as the asset's reference_image_url. The other five sheet views are
+# extra consistency references AND suppress the paid AI generation of that
+# view in _build_view_sheets (images.py). Legacy values (front/side/…) stay
+# accepted and normalize via canonical_view().
+RefView = Literal[
+    "front", "side", "back", "pose", "expression",           # legacy
+    "ref_front", "ref_side", "ref_back", "pose_run",         # canonical —
+    "expr_fear", "expr_determined",                          # VIEW_PROMPTS keys
+]
+
+SHEET_VIEW_ALIASES = {
+    "front": "ref_front",
+    "side": "ref_side",
+    "back": "ref_back",
+    "pose": "pose_run",
+    "expression": "expr_fear",
+}
+
+
+def canonical_view(view: str) -> str:
+    """Map a legacy upload view to its VIEW_PROMPTS sheet-view key."""
+    return SHEET_VIEW_ALIASES.get(view, view)
 
 
 # location reference behaviour: "world" (default) = the photo defines the

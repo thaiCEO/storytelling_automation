@@ -16,7 +16,9 @@ PRICES = {
     "flux-schnell": 0.038,       # per image
     "grok-imagine": 0.022,       # per image (xAI Grok Imagine)
     "seedance-2.0-mini": 0.056,  # per generated video second
-    "elevenlabs-v3": 0.10,       # per 1k characters
+    # per 1k characters — verified on the Atlas model page 2026-07-07
+    "elevenlabs/v3/text-to-speech": 0.003,
+    "elevenlabs-v3": 0.003,      # fallback key for unknown TTS models
     "xai/tts-v1": 0.015,         # per 1k characters
     "llm_per_minute": 0.07,      # 4 Sonnet passes, scales ~linearly
     "hook_storyboard_llm": 0.02, # one compact storyboard pass

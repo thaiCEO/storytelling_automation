@@ -174,11 +174,22 @@ user's roles, and wires the drawn edges into `bible.relationships`
 (unresolvable hints are skipped with a `bible_user_hint` warning in
 `pipeline.log`).
 
-`view` values: `front` (master identity — becomes the asset's
-`reference_image_url`), `side`, `back`, `pose`, `expression`. A character can
-have several boxes with the same name and different views; non-front views are
-appended after the master image in `scene_reference_urls()` (images.py) so
-profile/back/action shots stay on-model.
+`view` values — canonical sheet views (the `VIEW_PROMPTS` keys in images.py):
+`ref_front` (master identity — becomes the asset's `reference_image_url`),
+`ref_side`, `ref_back`, `pose_run`, `expr_fear`, `expr_determined`. Legacy
+values are still accepted and normalized by `canonical_view()` in models.py
+(front→ref_front, side→ref_side, back→ref_back, pose→pose_run,
+expression→expr_fear).
+
+**Cost saver — uploaded views skip generation.** The character box on
+/create is ONE box with 6 labeled slots. Every FILLED slot is used as-is
+and `_build_view_sheets()` skips generating that view (~$0.022 saved);
+every EMPTY slot is generated from the master. All 6 filled = zero refsheet
+API calls for that character. Exception: a sheet/collage upload
+(`is_character_sheet` or sheet keywords in name/filename) never counts as a
+view — clean per-view refs are still extracted FROM the sheet. Non-master
+views ride after the master image in `scene_reference_urls()` (images.py)
+so profile/back/action shots stay on-model.
 
 ## Multi-view character reference pack (prompt templates)
 

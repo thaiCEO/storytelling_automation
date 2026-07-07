@@ -53,9 +53,11 @@ const refNames = computed(() => refAssets.value.map(a => a.name))
 
 // narrator voice: pre-fill from the saved server-side default, optionally
 // save the current pick back as the default for future videos
+// two locked ElevenLabs v3 narrator voices — the internal "male"/"female"
+// keys are just the two slots; labels show the real voice names
 const voiceOptions = [
-  { value: 'male', label: 'Daniel (Male, English)', emoji: '🧔' },
-  { value: 'female', label: 'Eve (Female, English)', emoji: '👩' },
+  { value: 'male', label: 'Chris (Male, En-US)', emoji: '🧔' },
+  { value: 'female', label: 'Adam (Male, En-US)', emoji: '🧑' },
 ]
 const voiceLanguageLabel = 'English (EN)'
 const voiceLanguageDescription = 'Narration and AI voice are generated in English only.'
@@ -84,6 +86,13 @@ function surpriseMe() {
 const submitting = ref(false)
 const error = ref('')
 
+// characters carry their pictures in view slots; locations/objects in file
+function hasPicture(a: RefAsset): boolean {
+  return a.kind === 'character'
+    ? Object.keys(a.slots ?? {}).length > 0
+    : !!a.file
+}
+
 async function submit() {
   if (!topicValid.value) { error.value = 'Topic must be 10–50 words.'; return }
   if (refAssets.value.some(a => !a.name.trim())) {
@@ -91,7 +100,7 @@ async function submit() {
     return
   }
   // pictures are optional — a box without one is a hint (name + role) only
-  const uploads = refAssets.value.filter(a => a.file)
+  const uploads = refAssets.value.filter(hasPicture)
   if (uploads.length && !rightsConfirmed.value) {
     error.value = 'Please confirm you own the rights to the uploaded images.'
     return
@@ -107,14 +116,14 @@ async function submit() {
     // boxes without a picture ride along in the body as hint-only references
     // (url stays empty); boxes with a picture are uploaded after creation
     const hintOnlyRefs = refAssets.value
-      .filter(a => !a.file)
+      .filter(a => !hasPicture(a))
       .map(a => ({
         kind: a.kind,
         name: a.name.trim(),
-        view: a.kind === 'character' ? a.view : 'front',
+        view: a.kind === 'character' ? 'ref_front' : 'front',
         mode: a.kind === 'location' ? a.mode : 'exact',
         role: a.kind === 'character' ? a.role : '',
-        is_character_sheet: a.kind === 'character' ? a.is_character_sheet : false,
+        is_character_sheet: false,
       }))
     const { story_id } = await api.createStory({
       ...form,
@@ -125,16 +134,34 @@ async function submit() {
     })
     if (uploads.length) {
       for (const a of uploads) {
-        const fd = new FormData()
-        fd.append('kind', a.kind)
-        fd.append('name', a.name.trim())
-        fd.append('view', a.kind === 'character' ? a.view : 'front')
-        fd.append('mode', a.kind === 'location' ? a.mode : 'exact')
-        fd.append('is_character_sheet', a.kind === 'character' && a.is_character_sheet ? 'true' : 'false')
-        if (a.kind === 'character' && a.role) fd.append('role', a.role)
-        fd.append('rights_confirmed', 'true')
-        fd.append('file', a.file!)
-        await api.uploadReference(story_id, fd)
+        if (a.kind === 'character') {
+          // one POST per filled view slot — every uploaded view is a view
+          // the pipeline does NOT have to generate
+          for (const [view, slot] of Object.entries(a.slots ?? {})) {
+            if (!slot) continue
+            const fd = new FormData()
+            fd.append('kind', 'character')
+            fd.append('name', a.name.trim())
+            fd.append('view', view)
+            fd.append('mode', 'exact')
+            fd.append('is_character_sheet',
+              view === 'ref_front' && a.is_character_sheet ? 'true' : 'false')
+            if (a.role) fd.append('role', a.role)
+            fd.append('rights_confirmed', 'true')
+            fd.append('file', slot.file)
+            await api.uploadReference(story_id, fd)
+          }
+        } else {
+          const fd = new FormData()
+          fd.append('kind', a.kind)
+          fd.append('name', a.name.trim())
+          fd.append('view', 'front')
+          fd.append('mode', a.kind === 'location' ? a.mode : 'exact')
+          fd.append('is_character_sheet', 'false')
+          fd.append('rights_confirmed', 'true')
+          fd.append('file', a.file!)
+          await api.uploadReference(story_id, fd)
+        }
       }
       await api.retry(story_id) // start the pipeline now that refs are attached
     }
@@ -254,13 +281,15 @@ async function submit() {
         @link="(h) => relationshipHints.push(h)"
       />
       <p class="mt-2 text-xs text-zinc-500">
-        🪄 Character / Object: upload រូប front តែ 1 សន្លឹកគ្រប់គ្រាន់ — ប្រព័ន្ធនឹងបង្កើត
-        side / back / pose / expression ដោយស្វ័យប្រវត្តិ ដើម្បីឱ្យ AI យល់រាងកាយពេញ
-        (full body) គ្រប់ scene។ Location: default = 🌍 World style — គ្រប់ scene
-        បង្កើតកន្លែង/មុំខុសៗគ្នា តែស្ថិតក្នុងពិភពតែមួយ (ឧ. ពិភពឆ្នាំ 3000)។ ជ្រើស 📍 Exact
-        place បើចង់ឃើញកន្លែងដដែលទាំងស្រុងគ្រប់ scene (ឧ. ហាងរបស់អ្នក)។
+        🪄 Character: upload រូប "មុខ (master)" 1 សន្លឹកគ្រប់គ្រាន់ — slot ទទេ
+        (ចំហៀង / ក្រោយ / រត់ / expressions) AI នឹង generate ដោយស្វ័យប្រវត្តិ
+        (~$0.022/view)។ បើអ្នកមាន views ស្រាប់ បំពេញ slots ទាំង 6 ដើម្បីរំលង
+        generation ទាំងស្រុង (សន្សំ ~$0.13/តួ)។ Location: default = 🌍 World
+        style — គ្រប់ scene បង្កើតកន្លែង/មុំខុសៗគ្នា តែស្ថិតក្នុងពិភពតែមួយ
+        (ឧ. ពិភពឆ្នាំ 3000)។ ជ្រើស 📍 Exact place បើចង់ឃើញកន្លែងដដែលទាំងស្រុង
+        គ្រប់ scene (ឧ. ហាងរបស់អ្នក)។
       </p>
-      <label v-if="refAssets.some(a => a.file)" class="mt-3 flex items-center gap-2 text-xs text-zinc-400">
+      <label v-if="refAssets.some(hasPicture)" class="mt-3 flex items-center gap-2 text-xs text-zinc-400">
         <input v-model="rightsConfirmed" type="checkbox" class="accent-amber-400">
         I own or have the rights to use these images. No photos of minors.
       </label>

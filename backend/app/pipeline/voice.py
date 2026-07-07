@@ -83,11 +83,14 @@ def build_tts_payload(text: str, voice_id: str) -> dict:
         "voice": voice_id,
     }
     if "eleven" in model.lower():
+        # Atlas elevenlabs/v3/text-to-speech schema (verified 2026-07-07):
+        # only voice / stability / apply_text_normalization are accepted —
+        # similarity_boost, speed, output_format and language are NOT.
+        # "voice" takes the internal id (e.g. Chris iP95p4xoKVk53GoZ742B),
+        # never the display name.
         payload.update({
             "stability": 0.5,
-            "similarity_boost": 0.75,
-            "speed": 1.0,
-            "output_format": "mp3_44100_128",
+            "apply_text_normalization": "auto",
         })
     return payload
 

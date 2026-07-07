@@ -15,7 +15,8 @@ from pydantic import ValidationError
 
 from .clients.atlas import AtlasError, atlas
 from .config import settings
-from .models import Bible, ReferenceImage, StoryInput, StoryState, UserPrefs
+from .models import (Bible, ReferenceImage, StoryInput, StoryState, UserPrefs,
+                     canonical_view)
 from .pipeline.runner import (load_state, run_pipeline, save_state,
                               sweep_orphaned_runs)
 from .utils import cost as cost_util
@@ -43,7 +44,7 @@ SHEET_FILENAME_KEYWORDS = (
 def _looks_like_character_sheet_upload(
     kind: str, view: str, filename: str | None, content: bytes
 ) -> bool:
-    if kind != "character" or view != "front":
+    if kind != "character" or canonical_view(view) != "ref_front":
         return False
 
     name = (filename or "").lower()

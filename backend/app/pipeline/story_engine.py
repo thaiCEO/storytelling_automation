@@ -13,7 +13,7 @@ from typing import Any
 from ..clients.atlas import atlas, parse_llm_json
 from ..models import (ALLOWED_AUDIO_TAGS, CHARACTER_ROLES, RELATIONSHIP_TYPES,
                       Beat, BeatSheet, Bible, Premise, Relationship, Scene,
-                      Script, StoryInput)
+                      Script, StoryInput, canonical_view)
 from ..utils.cost import add_cost
 from ..utils.log import PipelineLog
 
@@ -570,15 +570,8 @@ def find_uploaded_character_sheet_url(asset_name: str, inp: StoryInput) -> str |
             url_lower = r.url.lower()
             if any(kw in name_lower for kw in keywords) or any(kw in url_lower for kw in ["sheet", "turnaround"]):
                 return r.url
-    # 2. Check if the user uploaded all 5 views separately. If so, use the front view as the master reference image.
-    matching = [r for r in inp.reference_images
-                if r.kind == "character" and r.url and r.name
-                and (r.name.lower() in asset_name.lower() or asset_name.lower() in r.name.lower())]
-    views = {r.view for r in matching}
-    if {"front", "side", "back", "pose", "expression"}.issubset(views):
-        front_ref = next((r for r in matching if r.view == "front"), None)
-        if front_ref:
-            return front_ref.url
+    # separately uploaded views are NOT a sheet (the master is a plain front
+    # image) — the ref_front master wiring in run_story_engine covers them
     return None
 
 
@@ -651,7 +644,7 @@ async def run_story_engine(story_dir: Path, inp: StoryInput) -> Script:
             if loc.reference_image_url in world_urls:
                 loc.reference_image_url = None
         for r in inp.reference_images:
-            if not r.url or r.view != "front":
+            if not r.url or canonical_view(r.view) != "ref_front":
                 continue
             if r.kind == "location" and r.mode == "world":
                 continue

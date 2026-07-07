@@ -15,7 +15,8 @@ from pathlib import Path
 
 from ..clients.atlas import atlas
 from ..config import settings
-from ..models import Bible, ImageManifestEntry, Scene, Script, StoryInput
+from ..models import (Bible, ImageManifestEntry, Scene, Script, StoryInput,
+                      canonical_view)
 from ..utils.cost import PRICES, add_cost
 from ..utils.log import PipelineLog
 from .formats import FORMATS, FormatSpec
@@ -141,21 +142,33 @@ def build_prompt(scene: Scene, bible: Bible, image_style: str, model: str,
     return ", ".join(p for p in parts if p)
 
 
+SHEET_KEYWORDS = [
+    "character sheet",
+    "turnaround",
+    "refsheet",
+    "model sheet",
+    "reference sheet",
+    "multi-view",
+    "multiview",
+]
+
+
+def _ref_is_sheet(r) -> bool:
+    """A single upload that is itself a multi-view sheet/collage."""
+    if r.is_character_sheet:
+        return True
+    name, url = r.name.lower(), r.url.lower()
+    return (any(kw in name for kw in SHEET_KEYWORDS)
+            or any(kw in url for kw in ("sheet", "turnaround")))
+
+
 def is_character_sheet(asset, inp: StoryInput) -> bool:
     """Check if the asset has a complete character sheet uploaded."""
     if not hasattr(asset, "role"):  # locations and objects don't have roles
         return False
 
     dna = (asset.visual_dna or "").lower()
-    dna_keywords = [
-        "character sheet",
-        "turnaround",
-        "refsheet",
-        "model sheet",
-        "reference sheet",
-        "multi-view",
-        "multiview",
-    ]
+    dna_keywords = SHEET_KEYWORDS
     if any(kw in dna for kw in dna_keywords):
         return True
     if "front" in dna and "side" in dna and "back" in dna:
@@ -177,23 +190,21 @@ def is_character_sheet(asset, inp: StoryInput) -> bool:
         if any(kw in name_lower for kw in dna_keywords) or any(kw in url_lower for kw in ["sheet", "turnaround"]):
             return True
 
-    # Check if the user uploaded all 5 views separately
-    views = {r.view for r in matching_refs}
-    if {"front", "side", "back", "pose", "expression"}.issubset(views):
-        return True
-
+    # NOTE: separately uploaded views are NOT a sheet — the master is a
+    # plain front image, so the other views must keep riding as extra scene
+    # refs (extra_view_urls) instead of being dropped as sheet-covered.
     return False
 
 
 def extra_view_urls(inp: StoryInput, bible: Bible) -> dict[str, list[str]]:
     """asset_id -> user reference urls beyond the master front view
-    (side/back/pose/expression), matched to bible assets by name."""
+    (side/back/pose/expressions), matched to bible assets by name."""
     out: dict[str, list[str]] = {}
     for asset in bible.characters + bible.locations + bible.objects:
         if is_character_sheet(asset, inp):
             continue
         urls = [r.url for r in inp.reference_images
-                if r.url and r.view != "front" and r.name
+                if r.url and canonical_view(r.view) != "ref_front" and r.name
                 and (r.name.lower() in asset.name.lower()
                      or asset.name.lower() in r.name.lower())]
         if urls:
@@ -364,9 +375,15 @@ def _sheet_model(image_model: str) -> str:
 
 
 def _user_views(inp: StoryInput, asset) -> set[str]:
-    return {r.view for r in inp.reference_images
-            if r.name and (r.name.lower() in asset.name.lower()
-                           or asset.name.lower() in r.name.lower())}
+    """Canonical sheet-view keys the user already uploaded for this asset —
+    each one suppresses the paid generation of that view (cost saver).
+
+    A sheet/collage upload never counts as a view: clean standalone views
+    still get generated FROM the sheet."""
+    return {canonical_view(r.view) for r in inp.reference_images
+            if r.url and r.name and not _ref_is_sheet(r)
+            and (r.name.lower() in asset.name.lower()
+                 or asset.name.lower() in r.name.lower())}
 
 
 async def _build_view_sheets(bible: Bible, inp: StoryInput, story_dir: Path,
@@ -425,7 +442,9 @@ async def _build_view_sheets(bible: Bible, inp: StoryInput, story_dir: Path,
     for kind, asset in todo:
         have = _user_views(inp, asset)
         for view, desc in VIEW_PROMPTS[kind].items():
-            if view in have or view in sheets.get(asset.id, {}):
+            # canonical on both sides: object keys "side"/"back" normalize
+            # like the legacy upload views do
+            if canonical_view(view) in have or view in sheets.get(asset.id, {}):
                 continue
             try:
                 url = await asyncio.wait_for(
