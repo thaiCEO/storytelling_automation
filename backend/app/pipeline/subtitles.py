@@ -59,6 +59,12 @@ def strip_tags(text: str) -> str:
     return re.sub(r"\s*\[[^\]]*\]\s*", " ", text).strip()
 
 
+def strip_trailing_punct(text: str) -> str:
+    """On-screen style: cues never END with '.' or ',' (incl. '...');
+    mid-cue punctuation and meaningful '?' / '!' endings stay."""
+    return re.sub(r"[.,]+$", "", text.strip()).strip()
+
+
 def chunk(narration: str, max_chars: int = 42) -> list[str]:
     """Split on punctuation first, then length (<= max_chars chars)."""
     pieces = re.split(r"(?<=[.!?;,—])\s+", narration.strip())
@@ -112,7 +118,9 @@ def scene_cues(timing: SceneTiming, narration: str,
     for c in merged:
         dur = timing.audio_duration * len(c) / total_chars
         end = min(t0 + dur - CUE_GAP, t0 + MAX_CUE)
-        cues.append(Cue(start=round(t0, 3), end=round(end, 3), text=c))
+        text = strip_trailing_punct(c)
+        if text:  # a punctuation-only chunk vanishes entirely
+            cues.append(Cue(start=round(t0, 3), end=round(end, 3), text=text))
         t0 += dur
     return cues
 

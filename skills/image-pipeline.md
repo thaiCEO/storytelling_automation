@@ -104,6 +104,20 @@ Rules:
 {"model": "black-forest-labs/flux-schnell", "prompt": p,
  "size": "1280*720", "seed": -1, "num_images": 1}
 
+# Grok Imagine (text-to-image) — NO output_format param; resolution 1k|2k
+{"model": "xai/grok-imagine-image/text-to-image", "prompt": p,
+ "aspect_ratio": "16:9", "resolution": "2k"}
+
+# Grok Imagine (edit — reference images present)
+# CRITICAL: references go in "image_urls", NOT "images".
+# An "images" key is silently ignored by Atlas and the model degrades to
+# pure text-to-image — generated characters won't match the upload at all.
+# Docs claim up to 8 reference images; the LIVE API rejects >5 (HTTP 400
+# "supports at most 5 input image(s)") — cap at 5.
+{"model": "xai/grok-imagine-image/edit", "prompt": p,
+ "image_urls": [ref_urls],  # max 5 (live limit)
+ "aspect_ratio": "16:9", "resolution": "2k"}
+
 # Flux 2 Pro Edit (reference/edit)
 {"model": "black-forest-labs/flux-2-pro/edit", "prompt": p,
  "images": [ref_urls], "size": "1280*720",
@@ -114,6 +128,13 @@ Reference-image triggers (both models): any asset with
 `reference_image_url` (user upload — see `skills/asset-bible.md`), or
 consistency-anchor mode (scene-1 render of the main character uploaded via
 `uploadMedia` and reused for all later scenes with that character).
+
+Reference ordering (`scene_reference_urls` in images.py): master identity
+refs (upload/anchor) for EVERY cast member + location + props go first,
+then extra turnaround views round-robin across assets. Never fill all of
+one character's views before another character's master — per-model caps
+(grok/flux slice to 8) would silently drop later characters' identity in
+multi-cast scenes.
 
 ## Concurrency, retries, cost
 
@@ -127,10 +148,17 @@ consistency-anchor mode (scene-1 render of the main character uploaded via
 ## Output contract
 
 ```
-stories/{id}/images/scene_001.png ...
+stories/{id}/images/scene_001.png ...          ← shot 1 (legacy name; also
+                                                  anchor/hook/thumbnail source)
+stories/{id}/images/scene_001_s2.png ...       ← shots 2..N of deep scenes
 stories/{id}/images/manifest.json
-  ← [{scene_id, path, prompt, model, aspect, attempts}]
+  ← [{scene_id, path, extra_shots: [..], prompt, model, aspect, attempts}]
 ```
+
+Deep scenes (script `shots` array — see skills/story-engine.md) render one
+image per shot: `build_prompt(..., shot_camera=, shot_focus=)` swaps the
+camera and appends "focusing on {focus}"; same references for every shot of
+the scene.
 
 Never proceed to sync-render unless every scene has an image in the
 manifest.

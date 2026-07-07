@@ -7,8 +7,10 @@ See skills/image-pipeline.md.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import datetime, timezone
+from itertools import zip_longest
 from pathlib import Path
 
 from ..clients.atlas import atlas
@@ -51,6 +53,11 @@ SAFE_AREA_CLAUSE = {
 
 IMAGE_QUALITY = "high"
 
+# hard wall-clock cap per generate+upload step: hangs that slip past the
+# per-request httpx timeouts become clean, retryable failures instead of a
+# silent images_running-forever stall
+STEP_WATCHDOG_SEC = 600
+
 
 def _flux_size(fmt: FormatSpec) -> str:
     return "1280*720" if fmt.width > fmt.height else "720*1280"
@@ -64,9 +71,13 @@ def route_model(scene: Scene, image_model: str) -> str:
 
 
 def build_prompt(scene: Scene, bible: Bible, image_style: str, model: str,
-                 beat_summary: str = "", video_format: str = "youtube") -> str:
+                 beat_summary: str = "", video_format: str = "youtube",
+                 shot_camera: str = "", shot_focus: str = "") -> str:
     """[camera] shot of [char dna + state] in [location dna], [tod], [weather],
-    [action], featuring [object dna], [style anchor last]."""
+    [action], featuring [object dna], [style anchor last].
+
+    shot_camera/shot_focus override per shot in multi-shot (deep) scenes."""
+    camera = shot_camera or scene.camera
     parts: list[str] = []
     char_bits = []
     for cid in scene.cast:
@@ -93,11 +104,14 @@ def build_prompt(scene: Scene, bible: Bible, image_style: str, model: str,
         loc_dna = f"{scene.location_detail}, {loc_dna}"
 
     if char_bits:
-        parts.append(f"{scene.camera} shot of " + " and ".join(char_bits))
+        parts.append(f"{camera} shot of " + " and ".join(char_bits))
         parts.append(f"in {loc_dna}")
     else:
         # no-cast scenes start with location DNA
-        parts.append(f"{scene.camera} shot of {loc_dna}")
+        parts.append(f"{camera} shot of {loc_dna}")
+
+    if shot_focus:
+        parts.append(f"focusing on {shot_focus}")
 
     parts.append(scene.time_of_day)
     parts.append(scene.weather)
@@ -120,6 +134,8 @@ def build_prompt(scene: Scene, bible: Bible, image_style: str, model: str,
         parts.append(f"set in {bible.world}")
 
     parts.append(STYLE_PRESETS[image_style])  # style anchor LAST — every prompt
+    # narration/beat text otherwise gets rendered INTO the frame as captions
+    parts.append("no text, no captions, no lettering, no labels, no watermark")
     if model == "gpt-image-2":
         parts.append(SAFE_AREA_CLAUSE[video_format])
     return ", ".join(p for p in parts if p)
@@ -191,19 +207,152 @@ def extra_view_urls(inp: StoryInput, bible: Bible) -> dict[str, list[str]]:
 # photo. Views the user already uploaded themselves are skipped.
 VIEW_PROMPTS = {
     "character": {
-        "side": "full body side profile view, standing straight, whole body "
-                "visible from head to feet",
-        "back": "full body back view, standing straight, whole body visible "
-                "from head to feet",
-        "pose": "full body dynamic action pose, mid-motion, whole body visible",
-        "expression": "close-up portrait, intense emotional expression, face "
-                      "filling the frame",
+        "ref_front": "front-facing full-body standing pose, relaxed natural "
+                     "posture, arms hanging naturally at the sides, feet "
+                     "shoulder-width apart, looking directly at the camera, "
+                     "gentle neutral expression, perfect symmetrical body "
+                     "alignment",
+        "ref_side": "full-body side profile view for side-scroll spine "
+                    "reference, standing straight, whole body visible from "
+                    "head to feet",
+        "ref_back": "full-body back view, standing straight, whole body "
+                    "visible from head to feet",
+        "pose_run": "full-body dynamic running pose for the main chase action, "
+                    "mid-motion, whole body visible",
+        "expr_fear": "close-up portrait, fearful reaction expression, face "
+                     "filling the frame",
+        "expr_determined": "close-up portrait, determined hero expression, "
+                           "face filling the frame",
     },
     "object": {
         "side": "side view of the object, whole object visible, centered",
         "back": "back view of the object, whole object visible, centered",
     },
 }
+
+
+MASTER_CHARACTER_REF_VIEW = "ref_front"
+
+
+def _character_refsheet_identity(master_view: str, target_view: str) -> str:
+    if target_view == master_view:
+        view_rule = (
+            f"Use ONLY the front-facing full-body character ({master_view}) as "
+            "the source of truth. Ignore all other views. Recreate the "
+            f"character exactly as shown in the {master_view} reference. "
+        )
+    else:
+        view_rule = (
+            f"Use the front-facing full-body character ({master_view}) as the "
+            "source of truth for identity. Use the matching labeled view or "
+            "expression in the uploaded sheet only as pose/view guidance while "
+            f"preserving the {master_view} identity. "
+        )
+
+    return (
+        "REFERENCE\n"
+        "Use the uploaded character sheet as the ONLY master identity "
+        f"reference. {view_rule}"
+        "Maintain identical face shape, head size, facial proportions, "
+        "hairstyle, hair color, eye shape, nose, mouth, skin tone, body "
+        "proportions, arm thickness, leg thickness, hand size, foot size, "
+        "barefoot or shoe state, clothing silhouette, clothing construction, "
+        "primitive outfit details, belts, rope belt if present, fabric folds, "
+        "clothing colors, ink line quality, watercolor rendering, paper "
+        "texture, and overall illustration style. Do not redesign the "
+        "character. Do not change proportions. Do not change hairstyle. Do not "
+        "change clothing. Do not change colors. Do not add accessories, "
+        "jewelry, shoes, logos, scars, modern outfit details, or extra costume "
+        "pieces. Treat this as the permanent production model."
+    )
+
+
+CHARACTER_REFSHEET_BACKGROUND = (
+    "BACKGROUND\n"
+    "Solid neutral light gray background (#E5E5E5). Flat matte studio "
+    "backdrop. No gradients. No environment. No scenery. No props. No "
+    "decorative elements. No shadows on the background."
+)
+
+
+CHARACTER_REFSHEET_TEXT = (
+    "TEXT\n"
+    "Do NOT display any text. Do NOT display any labels. Do NOT display any "
+    "captions. Do NOT display any titles. Do NOT display any symbols. Do NOT "
+    "display any measurements. Do NOT display any watermark. Do NOT display "
+    "any logo."
+)
+
+
+def _character_refsheet_prompt(
+    view: str,
+    desc: str,
+    style: str,
+    master_view: str = MASTER_CHARACTER_REF_VIEW,
+) -> str:
+    if view == master_view:
+        pose = (
+            "POSE\n"
+            "Front-facing full-body standing pose. Relaxed natural posture. "
+            "Arms hanging naturally at the sides. Feet shoulder-width apart. "
+            "Looking directly at the camera. Gentle neutral expression. Perfect "
+            "symmetrical body alignment."
+        )
+        composition = (
+            "COMPOSITION\n"
+            "Character centered. Entire body visible from head to toes. "
+            "Comfortable margins around the character. No cropping. Portrait "
+            "composition. No additional views."
+        )
+        output = (
+            "OUTPUT\n"
+            "A single front-facing full-body master character reference. No "
+            "text. No labels. No additional views. Only the character on a "
+            "clean light gray studio background."
+        )
+    elif view.startswith("expr_"):
+        pose = f"POSE\n{desc}. Preserve the exact same identity from {master_view}."
+        composition = (
+            "COMPOSITION\n"
+            "Single close-up portrait reference. Face centered and fully "
+            "visible with comfortable margins. No labels. No additional views."
+        )
+        output = (
+            f"OUTPUT\n"
+            f"A single {view} close-up expression character reference. No text. "
+            f"No labels. No additional views. Only the character on a clean "
+            f"light gray studio background."
+        )
+    else:
+        pose = f"POSE\n{desc}. Preserve the exact same identity from {master_view}."
+        composition = (
+            "COMPOSITION\n"
+            "Character centered. Entire body visible from head to toes. "
+            "Comfortable margins around the character. No cropping. Single "
+            "reference pose. No additional views."
+        )
+        output = (
+            f"OUTPUT\n"
+            f"A single {view} full-body character reference matching the "
+            f"requested view. No text. No labels. No additional views. Only "
+            f"the character on a clean light gray studio background."
+        )
+
+    return (
+        f"{_character_refsheet_identity(master_view, view)}\n\n"
+        f"{pose}\n\n"
+        f"{composition}\n\n"
+        f"{CHARACTER_REFSHEET_BACKGROUND}\n\n"
+        f"{CHARACTER_REFSHEET_TEXT}\n\n"
+        "STYLE\n"
+        "Original storybook illustration. Classic children's book illustration. "
+        "Traditional watercolor painting. Hand-drawn ink line art. Soft pencil "
+        "texture. Organic brush strokes. Visible paper texture. Warm earth tone "
+        "palette. Natural handmade look. Minimalist character design. Family "
+        "friendly. Production ready. Highly consistent character design. Ultra "
+        f"detailed. 8K. {style}"
+        f"\n\n{output}"
+    )
 
 
 def _sheet_model(image_model: str) -> str:
@@ -221,28 +370,31 @@ def _user_views(inp: StoryInput, asset) -> set[str]:
 
 
 async def _build_view_sheets(bible: Bible, inp: StoryInput, story_dir: Path,
-                             log: PipelineLog) -> dict[str, list[str]]:
+                             log: PipelineLog) -> dict[str, dict[str, str]]:
     """For every character/object with a user-uploaded master image, generate
     the missing turnaround views via the edit endpoint (identity locked to the
-    upload), upload each to Atlas, and return asset_id -> [urls].
+    upload), upload each to Atlas, and return asset_id -> {view: url}.
 
-    Each generated view is completed, uploaded, and recorded before the next
-    view starts. Any failure stops the image stage immediately."""
+    refsheet.json accumulates per completed view, so a retry resumes exactly
+    where the previous run stopped instead of skipping the missing views.
+    Any failure stops the image stage immediately."""
     sheet_file = story_dir / "images" / "refsheet.json"
-    if sheet_file.exists():  # idempotent
-        return json.loads(sheet_file.read_text(encoding="utf-8"))
+    sheets: dict[str, dict[str, str]] = {}
+    if sheet_file.exists():
+        raw = json.loads(sheet_file.read_text(encoding="utf-8"))
+        # pre-view-keyed files (asset_id -> [urls]) lack view names — rebuild;
+        # cached view PNGs make that free apart from the re-upload
+        if raw and all(isinstance(v, dict) for v in raw.values()):
+            sheets = raw
 
     todo = []
     for kind, assets in (("character", bible.characters), ("object", bible.objects)):
         for asset in assets:
             if not asset.reference_image_url:
                 continue
-            if kind == "character" and is_character_sheet(asset, inp):
-                log.event("images", "refsheet_skipped", detail=f"character sheet detected for {asset.name}")
-                continue
             todo.append((kind, asset))
     if not todo:
-        return {}
+        return sheets
 
     model = _sheet_model(inp.image_model)
     fmt = FORMATS[inp.video_format]
@@ -250,12 +402,16 @@ async def _build_view_sheets(bible: Bible, inp: StoryInput, story_dir: Path,
     refs_dir = story_dir / "images" / "refs"
     refs_dir.mkdir(parents=True, exist_ok=True)
     async def one_view(asset, kind: str, view: str, desc: str) -> str:
-        prompt = (
-            f"character turnaround reference sheet image: the exact same {kind} "
-            f"as in the reference image, identical design, colors, face and "
-            f"details, {desc}, {asset.visual_dna}, plain neutral gray studio "
-            f"background, no text, no watermark, {style}"
-        )
+        if kind == "character":
+            prompt = _character_refsheet_prompt(view, desc, style)
+        else:
+            prompt = (
+                f"object turnaround reference image: the exact same {kind} as "
+                f"in the reference image, identical shape, materials, colors, "
+                f"surface details and scale, {desc}, {asset.visual_dna}, plain "
+                f"neutral gray studio background, no text, no labels, no "
+                f"watermark, {style}"
+            )
         out = refs_dir / f"{asset.id}_{view}.png"
         if not out.exists():
             _, payload, _ = _payload(model, prompt, [asset.reference_image_url], fmt)
@@ -266,19 +422,21 @@ async def _build_view_sheets(bible: Bible, inp: StoryInput, story_dir: Path,
                       detail=f"{asset.id} {view} {model}", cost_usd=usd)
         return await atlas.upload_media(out.read_bytes(), out.name, "image/png")
 
-    sheets: dict[str, list[str]] = {}
     for kind, asset in todo:
         have = _user_views(inp, asset)
         for view, desc in VIEW_PROMPTS[kind].items():
-            if view not in have:
-                try:
-                    url = await one_view(asset, kind, view, desc)
-                except Exception as exc:
-                    detail = f"{asset.id} {view}: {exc}"
-                    log.event("images", "refsheet_failed", detail=detail)
-                    raise RuntimeError(f"refsheet failed for {asset.id} {view}: {exc}") from exc
-                sheets.setdefault(asset.id, []).append(url)
-                sheet_file.write_text(json.dumps(sheets, indent=2), encoding="utf-8")
+            if view in have or view in sheets.get(asset.id, {}):
+                continue
+            try:
+                url = await asyncio.wait_for(
+                    one_view(asset, kind, view, desc),
+                    timeout=STEP_WATCHDOG_SEC)
+            except Exception as exc:
+                detail = f"{asset.id} {view}: {exc}"
+                log.event("images", "refsheet_failed", detail=detail)
+                raise RuntimeError(f"refsheet failed for {asset.id} {view}: {exc}") from exc
+            sheets.setdefault(asset.id, {})[view] = url
+            sheet_file.write_text(json.dumps(sheets, indent=2), encoding="utf-8")
 
     sheet_file.write_text(json.dumps(sheets, indent=2), encoding="utf-8")
     log.event("images", "refsheet_done",
@@ -289,17 +447,24 @@ async def _build_view_sheets(bible: Bible, inp: StoryInput, story_dir: Path,
 
 def scene_reference_urls(scene: Scene, bible: Bible, anchors: dict[str, str],
                          extra: dict[str, list[str]] | None = None) -> list[str]:
-    """User uploads (bible) + consistency anchors + extra views, max 14 (NB2 limit)."""
-    urls: list[str] = []
+    """User uploads (bible) + consistency anchors + extra views, max 14 (NB2 limit).
+
+    Master identity refs (upload or anchor) for every cast member, the
+    location and props go FIRST, then extra views round-robin across assets —
+    so per-model reference caps (grok/flux slice to 8) trim views, never a
+    character's only identity reference."""
+    masters: list[str] = []
+    view_lists: list[list[str]] = []
     for aid in scene.cast + [scene.location] + scene.props:
         asset = bible.get(aid)
         if asset and asset.reference_image_url:
-            urls.append(asset.reference_image_url)
+            masters.append(asset.reference_image_url)
         elif aid in anchors:
-            urls.append(anchors[aid])
+            masters.append(anchors[aid])
         if extra and aid in extra:
-            urls.extend(extra[aid])
-    return list(dict.fromkeys(urls))[:14]
+            view_lists.append(extra[aid])
+    views = [u for group in zip_longest(*view_lists) for u in group if u]
+    return list(dict.fromkeys(masters + views))[:14]
 
 
 def _manifest_path(story_dir: Path) -> Path:
@@ -325,6 +490,7 @@ def _commit_manifest_entry(story_dir: Path, entry: ImageManifestEntry,
     if existing and entry.attempts == 0:
         entry = existing.model_copy(update={
             "path": entry.path,
+            "extra_shots": entry.extra_shots,
             "prompt": entry.prompt,
             "model": entry.model,
             "aspect": entry.aspect,
@@ -355,15 +521,18 @@ def _payload(model: str, prompt: str, ref_urls: list[str],
              fmt: FormatSpec) -> tuple[str, dict, str]:
     """-> (atlas_model_id, request_payload, aspect)."""
     if model == "grok-imagine":
+        # Atlas schema: references go in "image_urls", NOT "images"; no
+        # output_format param; resolution is "1k" | "2k". Docs claim 8 ref
+        # images but the live API rejects >5 with HTTP 400.
         if ref_urls:
             return settings.image_edit_model_grok, {
                 "model": settings.image_edit_model_grok, "prompt": prompt,
-                "images": ref_urls[:3], "aspect_ratio": fmt.nb2_aspect,
-                "output_format": "png",
+                "image_urls": ref_urls[:5], "aspect_ratio": fmt.nb2_aspect,
+                "resolution": "2k",
             }, fmt.nb2_aspect
         return settings.image_model_grok, {
             "model": settings.image_model_grok, "prompt": prompt,
-            "aspect_ratio": fmt.nb2_aspect, "output_format": "png",
+            "aspect_ratio": fmt.nb2_aspect, "resolution": "2k",
         }, fmt.nb2_aspect
     if model == "flux-schnell":
         if ref_urls:
@@ -397,30 +566,53 @@ def _payload(model: str, prompt: str, ref_urls: list[str],
     return settings.image_model_nb2, payload, fmt.nb2_aspect
 
 
+def scene_shot_list(scene: Scene) -> list[tuple[str, str]]:
+    """(camera, focus) per shot; scenes without shots render exactly one
+    image from the scene's own camera (pre-pacing scripts unchanged)."""
+    if scene.shots:
+        return [(sh.camera, sh.focus) for sh in scene.shots]
+    return [(scene.camera, "")]
+
+
 async def _generate_one(scene: Scene, bible: Bible, inp: StoryInput,
                         story_dir: Path, log: PipelineLog,
                         anchors: dict[str, str], extra: dict[str, list[str]],
                         beat_summaries: dict[int, str]) -> ImageManifestEntry:
-    out = story_dir / "images" / f"scene_{scene.id:03}.png"
     fmt = FORMATS[inp.video_format]
     model = route_model(scene, inp.image_model)
     ref_urls = scene_reference_urls(scene, bible, anchors, extra)
-    prompt = build_prompt(scene, bible, inp.image_style, model,
-                          beat_summaries.get(scene.beat_id, ""), inp.video_format)
-    _, payload, aspect = _payload(model, prompt, ref_urls, fmt)
+    shots = scene_shot_list(scene)
 
-    if out.exists():  # idempotent by file presence
-        return ImageManifestEntry(scene_id=scene.id, path=f"images/{out.name}",
-                                  prompt=prompt, model=model, aspect=aspect, attempts=0)
+    paths: list[str] = []
+    first_prompt = ""
+    aspect = fmt.nb2_aspect
+    generated_any = False
+    for k, (cam, focus) in enumerate(shots, 1):
+        suffix = "" if k == 1 else f"_s{k}"  # shot 1 keeps the legacy name
+        out = story_dir / "images" / f"scene_{scene.id:03}{suffix}.png"
+        prompt = build_prompt(scene, bible, inp.image_style, model,
+                              beat_summaries.get(scene.beat_id, ""),
+                              inp.video_format, shot_camera=cam, shot_focus=focus)
+        if k == 1:
+            first_prompt = prompt
+        _, payload, aspect = _payload(model, prompt, ref_urls, fmt)
+        if not out.exists():  # idempotent per shot file
+            content = await asyncio.wait_for(
+                atlas.generate_image(payload, timeout=60), timeout=STEP_WATCHDOG_SEC)
+            out.write_bytes(content)
+            usd = PRICES[model]
+            add_cost(story_dir, "images",
+                     f"scene:{scene.id} shot:{k} model:{model}", usd)
+            log.event("images", "generated",
+                      detail=f"{model} shot:{k}/{len(shots)} refs:{len(ref_urls)}",
+                      scene_id=scene.id, cost_usd=usd)
+            generated_any = True
+        paths.append(f"images/{out.name}")
 
-    content = await atlas.generate_image(payload, timeout=60)
-    out.write_bytes(content)
-    usd = PRICES[model]
-    add_cost(story_dir, "images", f"scene:{scene.id} model:{model}", usd)
-    log.event("images", "generated", detail=f"{model} refs:{len(ref_urls)}",
-              scene_id=scene.id, cost_usd=usd)
-    return ImageManifestEntry(scene_id=scene.id, path=f"images/{out.name}",
-                              prompt=prompt, model=model, aspect=aspect)
+    return ImageManifestEntry(scene_id=scene.id, path=paths[0],
+                              extra_shots=paths[1:], prompt=first_prompt,
+                              model=model, aspect=aspect,
+                              attempts=1 if generated_any else 0)
 
 
 def _anchor_path(story_dir: Path) -> Path:
@@ -470,8 +662,8 @@ async def run_image_pipeline(story_dir: Path, inp: StoryInput, script: Script,
     # (side/back/pose/expression) so every scene sees the full body
     extra = extra_view_urls(inp, bible)
     sheets = await _build_view_sheets(bible, inp, story_dir, log)
-    for aid, urls in sheets.items():
-        extra.setdefault(aid, []).extend(urls)
+    for aid, view_urls in sheets.items():
+        extra.setdefault(aid, []).extend(view_urls.values())
 
     # Anchors are recorded inside the scene loop so scene generation remains
     # strictly in script order: scene 1 completes before scene 2 starts.
@@ -501,7 +693,9 @@ async def run_image_pipeline(story_dir: Path, inp: StoryInput, script: Script,
     missing = [
         str(scene.id) for scene in script.scenes
         if scene.id not in entries_by_id
-        or not (story_dir / entries_by_id[scene.id].path).exists()
+        or not all((story_dir / p).exists()
+                   for p in [entries_by_id[scene.id].path]
+                   + entries_by_id[scene.id].extra_shots)
     ]
     if missing:
         raise RuntimeError("image manifest missing scene(s): " + ", ".join(missing))

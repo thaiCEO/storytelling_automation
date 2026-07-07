@@ -145,8 +145,11 @@ async def run_voice_pipeline(story_dir: Path, script: Script,
     failed: list[str] = []
     for scene, res in zip(script.scenes, results):
         if isinstance(res, Exception):
-            failed.append(f"scene {scene.id}: {res}")
-            log.event("voice", "tts_failed", detail=str(res), scene_id=scene.id)
+            # str() of NotImplementedError/CancelledError is empty — keep the
+            # class name so failures are never blank in the log/UI
+            reason = str(res) or type(res).__name__
+            failed.append(f"scene {scene.id}: {reason}")
+            log.event("voice", "tts_failed", detail=reason, scene_id=scene.id)
         else:
             entries.append(res)
     if failed:
@@ -154,13 +157,14 @@ async def run_voice_pipeline(story_dir: Path, script: Script,
 
     entries.sort(key=lambda e: e.scene_id)
 
-    # quality checks before hand-off (warnings, not failures)
+    # quality checks before hand-off (warnings, not failures).
+    # deep-pacing scenes legitimately run 20-32s — only flag runaways
     warnings: list[str] = []
     for e in entries:
-        if e.duration_sec > 12:
+        if e.duration_sec > 40:
             warnings.append(
-                f"scene {e.scene_id}: narration {e.duration_sec:.1f}s > 12s "
-                "(likely word-count violation)")
+                f"scene {e.scene_id}: narration {e.duration_sec:.1f}s > 40s "
+                "(exceeds even deep pacing — likely word-count violation)")
     total = sum(e.duration_sec for e in entries)
     target = duration_minutes * 60
     if abs(total - target) > target * 0.15:

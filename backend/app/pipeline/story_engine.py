@@ -138,14 +138,29 @@ PASS4_SYSTEM = """You are a screenwriter converting beats into narrated scenes f
 slideshow-style cinematic video. Respond ONLY with valid JSON.
 
 Rules:
-- Expand the beats into exactly {scene_count} scenes (±5).
+- Aim for about {scene_count} scenes; FEWER is correct when you use deep
+  scenes (never more than {scene_count} + 5, never fewer than 60% of it).
 - Total narration word count: {word_target} words (±10%).
+- VARY THE PACING — every scene gets a "pacing" tier chosen by how much the
+  moment matters:
+  * "quick"    = 8-15 narration words (~5s). Punchy reveals, reactions,
+                 transitions. Use on ~20% of scenes.
+  * "standard" = 18-30 words (~8-12s). The default for most scenes.
+  * "deep"     = 45-80 words (~20-32s). The pivotal moments ONLY — the
+                 discovery, the twist, the emotional core. 1-2 per
+                 {scene_count} scenes. Never two deep scenes in a row.
+- Every "deep" scene MUST include "shots": 2-5 entries, one per ~12-18
+  narration words. Each shot = {{"camera": ..., "focus": "3-8 words naming
+  the specific visual moment"}} — different angles/details of the SAME
+  location and moment (e.g. wide of the clearing -> close-up of trembling
+  hands -> detail of the glowing stone). No two consecutive shots share the
+  same camera. quick/standard scenes omit "shots" (or use []).
 - Voice language is English only. narration must be natural English prose for
   spoken delivery; never write Khmer or other non-English script in narration.
-- narration: 10-20 words per scene, written for spoken delivery in the
-  requested narrator style. Insert ElevenLabs v3 audio tags sparingly where
-  they add emotion: [whispers] [excited] [sad] [pause] [intense]. At most one
-  tag per scene, none on more than 40% of scenes.
+- narration is written for spoken delivery in the requested narrator style.
+  Insert ElevenLabs v3 audio tags sparingly where they add emotion:
+  [whispers] [excited] [sad] [pause] [intense]. At most one tag per scene,
+  none on more than 40% of scenes.
 - Each scene lists cast / location / props by Bible ID ONLY. Do not write
   visual descriptions — code builds image prompts from the Bible.
 - camera: wide | medium | close-up | over-shoulder | aerial | detail.
@@ -175,7 +190,29 @@ Output:
       "time_of_day": "dusk",
       "weather": "orange haze",
       "character_state": "alert, wary",
+      "pacing": "quick",
+      "shots": [],
       "duration_estimate_sec": 6
+    }},
+    {{
+      "id": 2,
+      "beat_id": 1,
+      "narration": "He knelt at the crater's edge... (a 45-80 word deep moment)",
+      "cast": ["char_rot"],
+      "location": "loc_ruins",
+      "location_detail": "impact crater below the platform",
+      "props": ["obj_blade"],
+      "camera": "wide",
+      "time_of_day": "dusk",
+      "weather": "orange haze",
+      "character_state": "stunned, reverent",
+      "pacing": "deep",
+      "shots": [
+        {{"camera": "wide", "focus": "crater rim under orange sky"}},
+        {{"camera": "close-up", "focus": "his trembling scarred hands"}},
+        {{"camera": "detail", "focus": "blade humming with energy"}}
+      ],
+      "duration_estimate_sec": 28
     }}
   ]
 }}"""
@@ -455,9 +492,32 @@ def validate_script(script: Script, bible: Bible, inp: StoryInput) -> list[str]:
         errors.append(
             f"total narration words {total_words} outside ±10% of target {inp.word_target}")
 
-    if abs(len(script.scenes) - inp.scene_count) > 5:
+    # deep scenes absorb several scenes' worth of words, so fewer scenes than
+    # the nominal target is correct — only reject extremes
+    count_lo = max(1, round(inp.scene_count * 0.6))
+    count_hi = inp.scene_count + 5
+    if not count_lo <= len(script.scenes) <= count_hi:
         errors.append(
-            f"scene count {len(script.scenes)} outside ±5 of target {inp.scene_count}")
+            f"scene count {len(script.scenes)} outside {count_lo}-{count_hi} "
+            f"(target ~{inp.scene_count}, fewer is fine with deep scenes)")
+
+    # variable pacing: word budget + shot coverage per scene
+    valid_cameras = {"wide", "medium", "close-up", "over-shoulder", "aerial", "detail"}
+    for s in script.scenes:
+        words = len(_strip_tags(s.narration).split())
+        if words > 90:
+            errors.append(f"scene {s.id}: narration {words} words > 90 max")
+        if words > 34 and len(s.shots) < 2:
+            errors.append(
+                f"scene {s.id}: {words}-word deep scene needs \"shots\" "
+                "(2-5 entries, one per ~12-18 words)")
+        if len(s.shots) > 5:
+            errors.append(f"scene {s.id}: {len(s.shots)} shots > 5 max")
+        for k, shot in enumerate(s.shots, 1):
+            if shot.camera not in valid_cameras:
+                errors.append(f"scene {s.id} shot {k}: unknown camera '{shot.camera}'")
+            if not shot.focus.strip():
+                errors.append(f"scene {s.id} shot {k}: empty focus")
 
     for s in script.scenes:
         for ref in s.cast + [s.location] + s.props:

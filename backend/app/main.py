@@ -16,7 +16,8 @@ from pydantic import ValidationError
 from .clients.atlas import AtlasError, atlas
 from .config import settings
 from .models import Bible, ReferenceImage, StoryInput, StoryState, UserPrefs
-from .pipeline.runner import load_state, run_pipeline, save_state
+from .pipeline.runner import (load_state, run_pipeline, save_state,
+                              sweep_orphaned_runs)
 from .utils import cost as cost_util
 
 app = FastAPI(title="Story Automation")
@@ -57,33 +58,6 @@ def _looks_like_character_sheet_upload(
 
     # Character sheets are commonly wide collages with multiple poses/views.
     return width >= 1000 and height >= 500 and width / max(height, 1) >= 1.55
-
-
-def _crop_ref_front_from_character_sheet(content: bytes) -> bytes | None:
-    """Extract the left-side ref_front panel from a wide character sheet.
-
-    This repo's generated sheets place the master front identity on the left,
-    with labels at the bottom. The crop intentionally excludes that text so
-    the image model sees one clean master reference instead of a collage.
-    """
-    try:
-        with Image.open(io.BytesIO(content)) as img:
-            img = img.convert("RGB")
-            width, height = img.size
-            if width < 1000 or height < 500 or width / max(height, 1) < 1.55:
-                return None
-            box = (
-                int(width * 0.035),
-                int(height * 0.035),
-                int(width * 0.305),
-                int(height * 0.91),
-            )
-            crop = img.crop(box)
-            out = io.BytesIO()
-            crop.save(out, format="PNG")
-            return out.getvalue()
-    except (UnidentifiedImageError, OSError):
-        return None
 
 
 class StoryCreate(StoryInput):
@@ -155,31 +129,21 @@ async def upload_reference(story_id: str, kind: str = Form(...),
     if len(content) > 10 * 1024 * 1024:
         raise HTTPException(422, "file exceeds 10 MB")
 
-    sheet = is_character_sheet or _looks_like_character_sheet_upload(
-        kind, view, file.filename, content)
-    ref_url = ""
-    source_url = ""
-
     try:
-        source_url = await atlas.upload_media(content, file.filename or "reference.png",
-                                             file.content_type)
-        ref_url = source_url
-        if sheet:
-            crop = _crop_ref_front_from_character_sheet(content)
-            if crop:
-                ref_url = await atlas.upload_media(
-                    crop, f"{Path(file.filename or 'reference').stem}_ref_front.png",
-                    "image/png")
+        url = await atlas.upload_media(content, file.filename or "reference.png",
+                                       file.content_type)
     except AtlasError as e:
         raise HTTPException(502, f"reference upload failed: {e}") from e
     except Exception as e:
         raise HTTPException(500, f"reference upload failed unexpectedly: {e}") from e
 
+    sheet = is_character_sheet or _looks_like_character_sheet_upload(
+        kind, view, file.filename, content)
+
     try:
         ref = ReferenceImage(kind=kind, name=name.strip(), view=view,
-                             mode=mode, role=role.strip(), url=ref_url,
-                             is_character_sheet=sheet,
-                             source_image_url=source_url if sheet else "")
+                             mode=mode, role=role.strip(), url=url,
+                             is_character_sheet=sheet)
     except ValidationError as e:
         raise HTTPException(422, str(e))
 
@@ -282,6 +246,13 @@ def result(story_id: str):
         "cost": cost_util.totals(story_dir),
         "warnings": state.warnings,
     }
+
+
+@app.on_event("startup")
+def startup() -> None:
+    # no background task survives a restart — free orphaned *_running
+    # stories so the retry endpoint stops rejecting them as busy
+    sweep_orphaned_runs()
 
 
 @app.on_event("shutdown")

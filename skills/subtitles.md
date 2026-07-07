@@ -32,6 +32,10 @@ Strip ALL audio tags (`[whispers]`, `[excited]`, `[pause]`, `[sad]`,
 `[intense]`) from narration before subtitle use — they must never appear
 on screen.
 
+Cue text never ENDS with `.` or `,` (incl. `...`) — strip them from the
+end of every cue (`strip_trailing_punct` in subtitles.py). Mid-cue
+punctuation and meaningful `?` / `!` endings stay.
+
 ## Step 2 — Timing (per scene, then per chunk)
 
 Scene audio start time = the scene's audio offset from the sync-render

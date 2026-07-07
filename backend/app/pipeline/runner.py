@@ -30,7 +30,8 @@ _running: set[str] = set()  # one runner per story at a time
 def load_state(story_dir: Path) -> StoryState:
     path = story_dir / "state.json"
     if path.exists():
-        return StoryState.model_validate_json(path.read_text(encoding="utf-8"))
+        # utf-8-sig tolerates BOM-prefixed files from Windows editors/tools
+        return StoryState.model_validate_json(path.read_text(encoding="utf-8-sig"))
     return StoryState()
 
 
@@ -43,6 +44,31 @@ def save_state(story_dir: Path, state: StoryState) -> None:
 def load_input(story_dir: Path) -> StoryInput:
     return StoryInput.model_validate_json(
         (story_dir / "input.json").read_text(encoding="utf-8"))
+
+
+def sweep_orphaned_runs() -> None:
+    """Server (re)start: background tasks never survive a restart (e.g.
+    uvicorn --reload), so any story still in a *_running state is orphaned —
+    park it as failed_{stage} so POST /retry can resume it."""
+    for state_path in settings.stories_dir.glob("*/state.json"):
+        story_dir = state_path.parent
+        try:
+            state = load_state(story_dir)
+        except Exception as exc:
+            # one corrupt state.json must never take the whole server down
+            logger.warning("sweep: skipping unreadable state.json in %s: %s",
+                           story_dir.name, exc)
+            continue
+        if not state.state.endswith("_running"):
+            continue
+        stage = state.state.removesuffix("_running")
+        state.state = f"failed_{stage}"
+        state.error = "server restarted while this stage was running — retry to resume"
+        state.retryable = True
+        save_state(story_dir, state)
+        PipelineLog(story_dir).event("runner", "orphaned_run_parked",
+                                     detail=f"{stage}: server restart")
+        logger.info("parked orphaned run %s at stage %s", story_dir.name, stage)
 
 
 async def run_pipeline(story_id: str) -> None:

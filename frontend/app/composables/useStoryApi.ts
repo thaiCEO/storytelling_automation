@@ -74,7 +74,6 @@ export const useStoryApi = () => ({
       view: string
       url: string
       is_character_sheet: boolean
-      source_image_url: string
     }>(`/api/stories/${id}/references`, {
       method: 'POST',
       body: form,

@@ -142,19 +142,26 @@ Output:
 
 ## Pass 4 — Scene JSON (final script)
 
-System prompt (verbatim):
+System prompt (abridged — the authoritative prompt is `PASS4_SYSTEM` in
+`backend/app/pipeline/story_engine.py`):
 
 ```
 You are a screenwriter converting beats into narrated scenes for a
 slideshow-style cinematic video. Respond ONLY with valid JSON.
 
 Rules:
-- Expand the beats into exactly {scene_count} scenes (±5).
+- Aim for about {scene_count} scenes; FEWER is correct with deep scenes
+  (never more than +5, never fewer than 60% of target).
 - Total narration word count: {word_target} words (±10%).
-- narration: 10-20 words per scene, written for spoken delivery in the
-  requested narrator style. Insert ElevenLabs v3 audio tags sparingly where
-  they add emotion: [whispers] [excited] [sad] [pause] [intense]. At most one
-  tag per scene, none on more than 40% of scenes.
+- VARY THE PACING — every scene gets a "pacing" tier:
+  * "quick"    = 8-15 words (~5s): punchy reveals, reactions. ~20% of scenes.
+  * "standard" = 18-30 words (~8-12s): the default.
+  * "deep"     = 45-80 words (~20-32s): pivotal moments ONLY (discovery,
+    twist, emotional core), 1-2 per 10 scenes, never two in a row.
+- Every "deep" scene MUST include "shots": 2-5 of {"camera", "focus"} — one
+  per ~12-18 words, different angles/details of the SAME location and moment
+  so the screen changes every ~5-8s while one narration plays. No two
+  consecutive shots share a camera. quick/standard scenes omit shots.
 - Each scene lists cast / location / props by Bible ID ONLY. Do not write
   visual descriptions — code builds image prompts from the Bible.
 - camera: wide | medium | close-up | over-shoulder | aerial | detail.
@@ -178,7 +185,18 @@ Output:
       "time_of_day": "dusk",
       "weather": "orange haze",
       "character_state": "alert, wary",
+      "pacing": "quick",
+      "shots": [],
       "duration_estimate_sec": 6
+    },
+    {
+      "id": 2, "...": "a deep scene adds:",
+      "pacing": "deep",
+      "shots": [
+        {"camera": "wide", "focus": "crater rim under orange sky"},
+        {"camera": "close-up", "focus": "his trembling scarred hands"},
+        {"camera": "detail", "focus": "blade humming with energy"}
+      ]
     }
   ]
 }
@@ -188,10 +206,12 @@ Output:
 
 1. JSON parses; all required keys present (Pydantic model `Script`).
 2. Total words within ±10% of target.
-3. Scene count within ±5 of `scene_count`.
+3. Scene count within 60%…+5 of `scene_count` (deep scenes shrink the count).
 4. Every `cast`/`location`/`props` ID exists in `bible.json`.
 5. No two consecutive close-ups; scene 1 camera ∈ {wide, aerial}.
 6. Audio tags only from the allowed list, ≤1 per scene.
+6b. Pacing: no scene > 90 words; any scene > 34 words needs 2-5 shots with
+   valid cameras and non-empty focus (one image per shot downstream).
 7. On failure: send the validator's error list back to Sonnet with
    "Fix ONLY these issues, return the full corrected JSON." One retry max,
    then mark story `failed_validation` and surface to UI.

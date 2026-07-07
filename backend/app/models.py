@@ -41,9 +41,6 @@ class ReferenceImage(BaseModel):
     # True when the upload is already a full turnaround/model sheet. The image
     # pipeline uses it directly instead of generating replacement side/back refs.
     is_character_sheet: bool = False
-    # Original full upload when `url` has been replaced with an extracted
-    # front-view crop for stronger identity matching.
-    source_image_url: str = ""
     # optional user-assigned role for a character reference box (protagonist,
     # villain, minion…); soft-validated later, wired to the generated character
     # of the same name in apply_user_hints()
@@ -190,6 +187,14 @@ class BeatSheet(BaseModel):
     beats: list[Beat]
 
 
+class Shot(BaseModel):
+    """One visual within a scene. Deep scenes (long narration) carry several
+    shots so the screen changes every ~5-8s while one narration plays."""
+    camera: str = "medium"   # soft-validated (LLM output mid-pipeline)
+    # 3-8 words: the specific visual moment this shot shows
+    focus: str = ""
+
+
 class Scene(BaseModel):
     id: int
     beat_id: int
@@ -204,6 +209,12 @@ class Scene(BaseModel):
     time_of_day: str
     weather: str
     character_state: str = ""
+    # pacing tier: quick (8-15 words) | standard (18-30) | deep (45-80).
+    # plain str, soft-validated — a bad value must not crash the paid pass
+    pacing: str = "standard"
+    # deep scenes: 2-5 shots, one per ~12-18 narration words; empty = the
+    # scene's own camera as a single shot (all older scripts parse fine)
+    shots: list[Shot] = []
     duration_estimate_sec: float = 6
 
 
@@ -213,7 +224,9 @@ class Script(BaseModel):
 
 class ImageManifestEntry(BaseModel):
     scene_id: int
-    path: str
+    path: str                     # shot 1 — also the anchor/hook/thumb image
+    # shots 2..N of a deep scene (images/scene_XXX_s2.png, ...)
+    extra_shots: list[str] = []
     prompt: str
     model: str
     aspect: Literal["16:9", "3:2", "9:16", "2:3"]

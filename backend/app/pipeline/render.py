@@ -64,26 +64,81 @@ def kenburns_filter(scene_idx: int, camera: str, aspect: str, dur: float,
     filters = []
     if aspect in ("3:2", "2:3"):  # GPT Image 2 -> center-crop to final aspect
         filters.append(fmt.crop)
-    filters.append(fmt.scale)  # oversized intermediate prevents jitter
+    # anti-jitter supersampling: 4x intermediate (fmt.scale), zoompan rendered
+    # at 2x the target, then lanczos downscale — zoompan's integer-pixel crop
+    # steps land well below one output pixel and motion reads as smooth
+    filters.append(fmt.scale)
     filters.append(
-        f"zoompan={motion}:d={frames}:s={fmt.width}x{fmt.height}:fps={FPS}")
+        f"zoompan={motion}:d={frames}:s={fmt.width * 2}x{fmt.height * 2}:fps={FPS}")
+    filters.append(f"scale={fmt.width}:{fmt.height}:flags=lanczos")
     return ",".join(filters)
 
 
-async def build_clip(story_dir: Path, image_entry: dict, timing: SceneTiming,
-                     camera: str, scene_idx: int, fmt: FormatSpec) -> Path:
-    out = story_dir / "clips" / f"clip_{timing.scene_id:03}.mp4"
+CF_FRAMES = round(CROSSFADE * FPS)
+
+
+def _shot_frames(total_frames: int, n: int) -> list[int]:
+    """Split a scene's frame count into n sub-clip lengths whose xfade chain
+    (each join overlaps CF_FRAMES) reproduces total_frames EXACTLY, so the
+    outer merge offsets stay frame-accurate."""
+    if n <= 1:
+        return [total_frames]
+    padded = total_frames + CF_FRAMES * (n - 1)
+    base = padded // n
+    frames = [base] * n
+    for i in range(padded - base * n):  # distribute the remainder
+        frames[i] += 1
+    return frames
+
+
+async def _encode_kenburns(story_dir: Path, img: str, out: Path, dur: float,
+                           idx: int, camera: str, aspect: str,
+                           fmt: FormatSpec) -> Path:
     if out.exists():  # idempotent
         return out
-    vf = kenburns_filter(scene_idx, camera, image_entry["aspect"],
-                         timing.video_duration, fmt)
+    vf = kenburns_filter(idx, camera, aspect, dur, fmt)
     await ffmpeg.run([
-        "-loop", "1", "-i", str(story_dir / image_entry["path"]),
-        "-t", f"{timing.video_duration:.3f}",
+        "-framerate", str(FPS),  # keep input/output timebases aligned
+        "-loop", "1", "-i", str(story_dir / img),
+        "-t", f"{dur:.3f}",
         "-filter_complex", vf,
         "-c:v", "libx264", "-preset", "medium", "-crf", "18",
         "-pix_fmt", "yuv420p", "-an", str(out),
-    ], timeout=300, cwd=story_dir)
+    ], timeout=600, cwd=story_dir)
+    return out
+
+
+async def build_clip(story_dir: Path, image_entry: dict, timing: SceneTiming,
+                     cameras: list[str], scene_idx: int,
+                     fmt: FormatSpec) -> Path:
+    """One clip per scene. Deep scenes carry several shot images — each gets
+    its own Ken Burns sub-clip, chained with xfade so the screen changes
+    every few seconds while one narration plays."""
+    out = story_dir / "clips" / f"clip_{timing.scene_id:03}.mp4"
+    if out.exists():  # idempotent
+        return out
+
+    img_paths = [image_entry["path"]] + image_entry.get("extra_shots", [])
+    if len(img_paths) == 1:
+        return await _encode_kenburns(
+            story_dir, img_paths[0], out, timing.video_duration,
+            scene_idx, cameras[0], image_entry["aspect"], fmt)
+
+    total_frames = max(2, round(timing.video_duration * FPS))
+    frames = _shot_frames(total_frames, len(img_paths))
+    subs: list[Path] = []
+    durs: list[float] = []
+    for k, (img, f) in enumerate(zip(img_paths, frames)):
+        sub = story_dir / "clips" / f"clip_{timing.scene_id:03}_s{k + 1}.mp4"
+        cam = cameras[k] if k < len(cameras) else cameras[-1]
+        dur = f / FPS
+        # idx spreads motion patterns so consecutive shots never repeat one
+        await _encode_kenburns(story_dir, img, sub, dur,
+                               scene_idx * 5 + k, cam,
+                               image_entry["aspect"], fmt)
+        subs.append(sub)
+        durs.append(dur)
+    await _xfade_merge(subs, durs, out, story_dir)
     return out
 
 
@@ -311,7 +366,9 @@ async def run_render(story_dir: Path, inp: StoryInput, script: Script,
     audio_manifest = json.loads(
         (story_dir / "audio" / "manifest.json").read_text(encoding="utf-8"))
     timings = compute_timeline(audio_manifest)
-    camera_by_id = {s.id: s.camera for s in script.scenes}
+    # per-shot cameras for deep scenes; single-shot scenes use their own camera
+    cameras_by_id = {s.id: ([sh.camera for sh in s.shots] or [s.camera])
+                     for s in script.scenes}
 
     # 1. per-scene Ken Burns clips (parallel, capped)
     sem = asyncio.Semaphore(CLIP_CONCURRENCY)
@@ -321,7 +378,7 @@ async def run_render(story_dir: Path, inp: StoryInput, script: Script,
         nonlocal done
         async with sem:
             p = await build_clip(story_dir, image_manifest[t.scene_id], t,
-                                 camera_by_id.get(t.scene_id, "medium"), idx, fmt)
+                                 cameras_by_id.get(t.scene_id, ["medium"]), idx, fmt)
         done += 1
         if on_progress:
             await on_progress(done, len(timings))

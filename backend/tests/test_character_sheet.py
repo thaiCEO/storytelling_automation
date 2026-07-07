@@ -1,11 +1,7 @@
 import pytest
 from pathlib import Path
-from io import BytesIO
 
-from PIL import Image
-
-from app.main import (_crop_ref_front_from_character_sheet,
-                      _looks_like_character_sheet_upload)
+from app.main import _looks_like_character_sheet_upload
 from app.models import Asset, CharacterAsset, ReferenceImage, Scene, StoryInput, Bible
 from app.pipeline.images import (build_prompt, is_character_sheet,
                                  extra_view_urls, _build_view_sheets)
@@ -122,23 +118,6 @@ def test_character_sheet_upload_detected_by_filename():
     ) is True
 
 
-def test_character_sheet_ref_front_crop_outputs_left_panel_png():
-    img = Image.new("RGB", (2000, 1000), "white")
-    # Put a solid block inside the expected ref_front area.
-    for x in range(100, 500):
-        for y in range(100, 850):
-            img.putpixel((x, y), (120, 80, 40))
-    buf = BytesIO()
-    img.save(buf, format="JPEG")
-
-    cropped = _crop_ref_front_from_character_sheet(buf.getvalue())
-
-    assert cropped is not None
-    out = Image.open(BytesIO(cropped))
-    assert out.format == "PNG"
-    assert out.size == (540, 875)
-
-
 def test_exact_reference_prompt_does_not_repeat_conflicting_dna():
     char = CharacterAsset(
         id="char_orin",
@@ -168,6 +147,7 @@ def test_exact_reference_prompt_does_not_repeat_conflicting_dna():
     assert "exact same character from the uploaded reference image" in prompt
     assert "scarred teenage warrior" not in prompt
     assert "no added scars" in prompt
+    assert "no text, no captions" in prompt
 
 def test_extra_view_urls_skips_character_sheet():
     asset = CharacterAsset(id="char_lyra", name="Lyra", visual_dna="character sheet of a pilot", role="protagonist")
@@ -186,13 +166,14 @@ def test_extra_view_urls_skips_character_sheet():
     assert "char_lyra" not in res
 
 @pytest.mark.anyio
-async def test_build_view_sheets_skips_character_sheet(tmp_path):
+async def test_build_view_sheets_generates_refs_for_character_sheet(tmp_path, monkeypatch):
     asset = CharacterAsset(id="char_lyra", name="Lyra", visual_dna="a pilot", reference_image_url="https://example.com/char_sheet.png", role="protagonist")
     inp = StoryInput(
         topic="A very interesting topic that has at least ten words in it and a conflict",
         genre="sci-fi",
         ending="open",
         image_style="cinematic_realistic",
+        image_model="grok-imagine",
         reference_images=[
             ReferenceImage(kind="character", name="Lyra", view="front", url="https://example.com/char_sheet.png")
         ]
@@ -202,7 +183,48 @@ async def test_build_view_sheets_skips_character_sheet(tmp_path):
     
     bible = Bible(style="cinematic", world="world", characters=[asset], locations=[], objects=[])
     log = PipelineLog(tmp_path)
+    payloads = []
+
+    async def fake_generate_image(payload, *, timeout):
+        payloads.append(payload)
+        return b"png-bytes"
+
+    async def fake_upload_media(content, filename, mime):
+        return f"https://example.com/{filename}"
+
+    from app.pipeline import images
+    monkeypatch.setattr(images.atlas, "generate_image", fake_generate_image)
+    monkeypatch.setattr(images.atlas, "upload_media", fake_upload_media)
     
     sheets = await _build_view_sheets(bible, inp, tmp_path, log)
-    # The build should be skipped because of character sheet keyword, returning empty sheets dict
-    assert "char_lyra" not in sheets
+    assert len(payloads) == 6
+    first_prompt = payloads[0]["prompt"]
+    assert "Use the uploaded character sheet as the ONLY master identity reference" in first_prompt
+    assert "Use ONLY the front-facing full-body character (ref_front)" in first_prompt
+    assert "Ignore all other views" in first_prompt
+    assert "Front-facing full-body standing pose" in first_prompt
+    assert "A single front-facing full-body master character reference" in first_prompt
+    assert "Do NOT display any text" in first_prompt
+    assert "No additional views" in first_prompt
+    assert payloads[0]["model"].endswith("/edit")
+    assert payloads[0]["image_urls"] == ["https://example.com/char_sheet.png"]
+    assert "a pilot" not in first_prompt
+    assert "full-body dynamic running pose for the main chase action" in payloads[3]["prompt"]
+    assert "fearful reaction expression" in payloads[4]["prompt"]
+    assert "determined hero expression" in payloads[5]["prompt"]
+    assert sheets["char_lyra"] == {
+        "ref_front": "https://example.com/char_lyra_ref_front.png",
+        "ref_side": "https://example.com/char_lyra_ref_side.png",
+        "ref_back": "https://example.com/char_lyra_ref_back.png",
+        "pose_run": "https://example.com/char_lyra_pose_run.png",
+        "expr_fear": "https://example.com/char_lyra_expr_fear.png",
+        "expr_determined": "https://example.com/char_lyra_expr_determined.png",
+    }
+    for view in ("ref_front", "ref_side", "ref_back", "pose_run", "expr_fear", "expr_determined"):
+        assert (tmp_path / "images" / "refs" / f"char_lyra_{view}.png").exists()
+
+    # a second run resumes from refsheet.json and regenerates nothing
+    payloads.clear()
+    resumed = await _build_view_sheets(bible, inp, tmp_path, log)
+    assert payloads == []
+    assert resumed == sheets

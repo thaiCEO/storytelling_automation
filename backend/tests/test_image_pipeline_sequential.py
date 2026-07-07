@@ -91,7 +91,8 @@ def test_grok_text_payload(monkeypatch):
     assert atlas_model == "xai/grok-imagine-image/text-to-image"
     assert aspect == "16:9"
     assert payload["aspect_ratio"] == "16:9"
-    assert payload["output_format"] == "png"
+    assert payload["resolution"] == "2k"
+    assert "output_format" not in payload  # not in the Atlas grok schema
 
 
 def test_grok_edit_payload(monkeypatch):
@@ -100,15 +101,54 @@ def test_grok_edit_payload(monkeypatch):
     atlas_model, payload, aspect = images._payload(
         "grok-imagine",
         "prompt",
-        [f"https://example.com/{i}.png" for i in range(5)],
+        [f"https://example.com/{i}.png" for i in range(9)],
         images.FORMATS["tiktok"],
     )
 
     assert atlas_model == "xai/grok-imagine-image/edit"
     assert aspect == "9:16"
     assert payload["aspect_ratio"] == "9:16"
-    assert payload["output_format"] == "png"
-    assert len(payload["images"]) == 3  # Grok edit supports max 3 references
+    assert payload["resolution"] == "2k"
+    # Atlas grok edit takes references in "image_urls" — "images" is silently
+    # ignored and the model falls back to pure text-to-image. Docs say max 8
+    # but the live API 400s above 5.
+    assert "images" not in payload
+    assert len(payload["image_urls"]) == 5
+
+
+def test_scene_reference_urls_keeps_every_cast_master_within_model_cap():
+    from app.models import Asset, Bible, CharacterAsset, Scene
+
+    chars = [
+        CharacterAsset(id=f"char_{n}", name=n.title(), visual_dna="dna",
+                       reference_image_url=f"https://example.com/{n}_sheet.png",
+                       role=role)
+        for n, role in (("orin", "protagonist"), ("moko", "deuteragonist"),
+                        ("tora", "mentor"))
+    ]
+    bible = Bible(style="s", world="w", characters=chars,
+                  locations=[Asset(id="loc_river", name="River",
+                                   visual_dna="river bank")],
+                  objects=[])
+    scene = Scene(id=5, beat_id=3, narration="They meet.",
+                  cast=["char_orin", "char_moko", "char_tora"],
+                  location="loc_river", camera="medium",
+                  time_of_day="dawn", weather="mist")
+    extra = {f"char_{n}": [f"https://example.com/{n}_v{i}.png" for i in range(6)]
+             for n in ("orin", "moko", "tora")}
+
+    urls = images.scene_reference_urls(scene, bible, {}, extra)
+
+    # every cast member's master ref must survive the grok/flux 8-image slice
+    assert urls[:3] == [f"https://example.com/{n}_sheet.png"
+                        for n in ("orin", "moko", "tora")]
+    # remaining slots fill with extra views round-robin across the cast
+    assert urls[3:9] == [
+        "https://example.com/orin_v0.png", "https://example.com/moko_v0.png",
+        "https://example.com/tora_v0.png", "https://example.com/orin_v1.png",
+        "https://example.com/moko_v1.png", "https://example.com/tora_v1.png",
+    ]
+    assert len(urls) == 14  # NB2 cap
 
 
 @pytest.mark.anyio

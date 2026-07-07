@@ -34,22 +34,36 @@ Check `images/manifest.json` per scene: files with `aspect: "3:2"`
 For 3:2 sources (1536x1024), crop to exact 16:9 then animate:
 
 ```bash
-ffmpeg -loop 1 -i scene_001.png -t {dur} \
+ffmpeg -framerate 30 -loop 1 -i scene_001.png -t {dur} \
   -filter_complex "
     crop=1536:864:(iw-1536)/2:(ih-864)/2,
-    scale=2304:1296,
+    scale=7680:4320,
     zoompan=z='1.0+0.10*on/({dur}*30)':
       x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':
-      d={dur}*30:s=1920x1080:fps=30
+      d={dur}*30:s=3840x2160:fps=30,
+    scale=1920:1080:flags=lanczos
   " -c:v libx264 -preset medium -crf 18 -pix_fmt yuv420p clip_001.mp4
 ```
 
 - Alternate motion per scene to avoid monotony: even scenes zoom-in
   (1.0→1.10), odd scenes zoom-out (1.10→1.0); every 4th scene pan
   left↔right instead (animate `x` across the 3:2 overwidth).
-- Oversized intermediate (2304x1296) prevents zoompan jitter.
+- Anti-jitter supersampling is MANDATORY: zoompan crops on integer source
+  pixels, so slow moves step <1px/frame and judder. 4x intermediate
+  (`scale=7680:4320`) + zoompan at 2x target (`s=3840x2160`) + final
+  `scale=1920:1080:flags=lanczos` keeps steps sub-pixel. A 1.2x
+  intermediate with zoompan straight to 1080p visibly shakes.
 - Camera hint from script.json may override: `detail` → stronger zoom 1.15;
   `aerial`/`wide` → slow pan only.
+
+## Multi-shot (deep) scenes
+
+A scene whose image-manifest entry carries `extra_shots` gets one Ken Burns
+sub-clip per shot (`clip_XXX_s1.mp4`…), chained with the same 0.4s xfade
+into `clip_XXX.mp4`. Sub-clip lengths come from `_shot_frames()` in
+render.py — integer frame counts padded by CF_FRAMES per join so the merged
+clip reproduces the scene's quantized duration EXACTLY (the outer xfade
+offsets depend on it). Per-shot cameras come from the script's `shots`.
 
 ## Assembly
 
