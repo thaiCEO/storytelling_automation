@@ -109,9 +109,10 @@ class StoryInput(BaseModel):
     @field_validator("topic")
     @classmethod
     def topic_word_count(cls, v: str) -> str:
+        # up to a full ~400-word synopsis — Pass 1 preserves detailed plots
         words = len(v.split())
-        if not 10 <= words <= 50:
-            raise ValueError(f"topic must be 10-50 words (got {words})")
+        if not 10 <= words <= 400:
+            raise ValueError(f"topic must be 10-400 words (got {words})")
         return v
 
     # word/scene math — drives every pass (skills/story-engine.md)

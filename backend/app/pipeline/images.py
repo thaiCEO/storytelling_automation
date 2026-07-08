@@ -61,7 +61,10 @@ STEP_WATCHDOG_SEC = 600
 
 
 def _flux_size(fmt: FormatSpec) -> str:
-    return "1280*720" if fmt.width > fmt.height else "720*1280"
+    """Native full-HD output — 1920*1080 (youtube) / 1080*1920 (tiktok).
+    Atlas ranges verified 2026-07-07: flux-schnell size 256-4096,
+    flux-2-pro/edit 256-2048; schnell is priced per run, not per pixel."""
+    return f"{fmt.width}*{fmt.height}"
 
 
 def route_model(scene: Scene, image_model: str) -> str:
@@ -431,9 +434,11 @@ async def _build_view_sheets(bible: Bible, inp: StoryInput, story_dir: Path,
             )
         out = refs_dir / f"{asset.id}_{view}.png"
         if not out.exists():
-            _, payload, _ = _payload(model, prompt, [asset.reference_image_url], fmt)
+            atlas_model, payload, _ = _payload(model, prompt,
+                                               [asset.reference_image_url], fmt)
             out.write_bytes(await atlas.generate_image(payload, timeout=60))
-            usd = PRICES[model]
+            # price by the ACTUAL endpoint (edit vs text differ, e.g. flux)
+            usd = PRICES.get(atlas_model, PRICES[model])
             add_cost(story_dir, "images", f"refsheet:{asset.id}:{view}", usd)
             log.event("images", "refsheet_generated",
                       detail=f"{asset.id} {view} {model}", cost_usd=usd)
@@ -614,12 +619,13 @@ async def _generate_one(scene: Scene, bible: Bible, inp: StoryInput,
                               inp.video_format, shot_camera=cam, shot_focus=focus)
         if k == 1:
             first_prompt = prompt
-        _, payload, aspect = _payload(model, prompt, ref_urls, fmt)
+        atlas_model, payload, aspect = _payload(model, prompt, ref_urls, fmt)
         if not out.exists():  # idempotent per shot file
             content = await asyncio.wait_for(
                 atlas.generate_image(payload, timeout=60), timeout=STEP_WATCHDOG_SEC)
             out.write_bytes(content)
-            usd = PRICES[model]
+            # price by the ACTUAL endpoint (edit vs text differ, e.g. flux)
+            usd = PRICES.get(atlas_model, PRICES[model])
             add_cost(story_dir, "images",
                      f"scene:{scene.id} shot:{k} model:{model}", usd)
             log.event("images", "generated",

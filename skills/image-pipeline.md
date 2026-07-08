@@ -100,9 +100,11 @@ Rules:
  "output_format": "png"}
 # edit variant: add "images": [ref_urls] (up to 14)
 
-# Flux Schnell (text-to-image)
+# Flux Schnell (text-to-image) — size 256-4096/dim, priced PER RUN
+# ($0.003) so full HD costs the same as 720p; always request native
+# 1920*1080 (youtube) / 1080*1920 (tiktok)
 {"model": "black-forest-labs/flux-schnell", "prompt": p,
- "size": "1280*720", "seed": -1, "num_images": 1}
+ "size": "1920*1080", "seed": -1, "num_images": 1}
 
 # Grok Imagine (text-to-image) — NO output_format param; resolution 1k|2k
 {"model": "xai/grok-imagine-image/text-to-image", "prompt": p,
@@ -118,9 +120,10 @@ Rules:
  "image_urls": [ref_urls],  # max 5 (live limit)
  "aspect_ratio": "16:9", "resolution": "2k"}
 
-# Flux 2 Pro Edit (reference/edit)
+# Flux 2 Pro Edit (reference/edit) — size 256-2048/dim ($0.03/pic),
+# refs go in "images" (1-8)
 {"model": "black-forest-labs/flux-2-pro/edit", "prompt": p,
- "images": [ref_urls], "size": "1280*720",
+ "images": [ref_urls], "size": "1920*1080",
  "output_format": "png", "safety_tolerance": 2, "seed": -1}
 ```
 

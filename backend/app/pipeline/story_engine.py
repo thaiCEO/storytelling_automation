@@ -13,7 +13,7 @@ from typing import Any
 from ..clients.atlas import atlas, parse_llm_json
 from ..models import (ALLOWED_AUDIO_TAGS, CHARACTER_ROLES, RELATIONSHIP_TYPES,
                       Beat, BeatSheet, Bible, Premise, Relationship, Scene,
-                      Script, StoryInput, canonical_view)
+                      Script, Shot, StoryInput, canonical_view)
 from ..utils.cost import add_cost
 from ..utils.log import PipelineLog
 
@@ -24,6 +24,10 @@ Respond ONLY with valid JSON, no markdown fences.
 Rules:
 - Honor every field the user provided. Fields marked "auto" are yours to
   decide — choose what makes the strongest story.
+- The topic may be anything from a one-line idea to a detailed ~400-word
+  synopsis. When it is detailed, PRESERVE every named character, plot
+  point, and the specified ending — invent only what is missing; never
+  replace the user's story with your own.
 - Language: write all story text in English. If the topic includes Khmer or
   any other non-English text, translate/adapt it into natural English.
 - The story must fit the target duration narrated at ~150 words/minute.
@@ -149,12 +153,13 @@ Rules:
   * "deep"     = 45-80 words (~20-32s). The pivotal moments ONLY — the
                  discovery, the twist, the emotional core. 1-2 per
                  {scene_count} scenes. Never two deep scenes in a row.
-- Every "deep" scene MUST include "shots": 2-5 entries, one per ~12-18
-  narration words. Each shot = {{"camera": ..., "focus": "3-8 words naming
-  the specific visual moment"}} — different angles/details of the SAME
-  location and moment (e.g. wide of the clearing -> close-up of trembling
-  hands -> detail of the glowing stone). No two consecutive shots share the
-  same camera. quick/standard scenes omit "shots" (or use []).
+- Every scene longer than 30 narration words — which includes every "deep"
+  scene — MUST include "shots": 2-5 entries, one per ~12-18 narration
+  words. Each shot = {{"camera": ..., "focus": "3-8 words naming the
+  specific visual moment"}} — different angles/details of the SAME location
+  and moment (e.g. wide of the clearing -> close-up of trembling hands ->
+  detail of the glowing stone). No two consecutive shots share the same
+  camera. Scenes of 30 words or fewer omit "shots" (or use []).
 - Voice language is English only. narration must be natural English prose for
   spoken delivery; never write Khmer or other non-English script in narration.
 - narration is written for spoken delivery in the requested narrator style.
@@ -501,16 +506,13 @@ def validate_script(script: Script, bible: Bible, inp: StoryInput) -> list[str]:
             f"scene count {len(script.scenes)} outside {count_lo}-{count_hi} "
             f"(target ~{inp.scene_count}, fewer is fine with deep scenes)")
 
-    # variable pacing: word budget + shot coverage per scene
+    # variable pacing: word budget + shot quality per scene (missing shots
+    # are soft-fixed by normalize_script, never a hard failure)
     valid_cameras = {"wide", "medium", "close-up", "over-shoulder", "aerial", "detail"}
     for s in script.scenes:
         words = len(_strip_tags(s.narration).split())
         if words > 90:
             errors.append(f"scene {s.id}: narration {words} words > 90 max")
-        if words > 34 and len(s.shots) < 2:
-            errors.append(
-                f"scene {s.id}: {words}-word deep scene needs \"shots\" "
-                "(2-5 entries, one per ~12-18 words)")
         if len(s.shots) > 5:
             errors.append(f"scene {s.id}: {len(s.shots)} shots > 5 max")
         for k, shot in enumerate(s.shots, 1):
@@ -546,6 +548,42 @@ def validate_script(script: Script, bible: Bible, inp: StoryInput) -> list[str]:
 def _strip_tags(text: str) -> str:
     import re
     return re.sub(r"\[[^\]]+\]", "", text).strip()
+
+
+# next camera when code has to invent shot variety (never repeats the base)
+_ALT_CAMERA = {"wide": "close-up", "aerial": "medium", "medium": "close-up",
+               "close-up": "wide", "over-shoulder": "detail", "detail": "wide"}
+
+
+def normalize_script(script: Script, bible: Bible) -> list[str]:
+    """Soft-fix pacing gaps in place, mirroring normalize_bible: a scene
+    long enough to need shots (>34 words ≈ >14s on one still) that the LLM
+    left shotless gets code-synthesized shots instead of failing the paid
+    story stage. Returns human-readable warnings."""
+    warnings: list[str] = []
+    for s in script.scenes:
+        words = len(_strip_tags(s.narration).split())
+        if words <= 34 or len(s.shots) >= 2:
+            continue
+        n = min(5, max(2, round(words / 15)))
+        place = s.location_detail or "the scene setting"
+        shots = [Shot(camera=s.camera, focus=place)]
+        cast_names = [a.name for cid in s.cast
+                      if (a := bible.get(cid)) is not None]
+        cam = s.camera
+        for i in range(1, n):
+            cam = _ALT_CAMERA.get(cam, "close-up")
+            if i == 1 and cast_names:
+                focus = f"{cast_names[0]}'s face and reaction"
+            elif i == 2 and s.props and (prop := bible.get(s.props[0])):
+                focus = f"{prop.name} in detail"
+            else:
+                focus = f"another angle of {place}"
+            shots.append(Shot(camera=cam, focus=focus))
+        s.shots = shots
+        warnings.append(
+            f"scene {s.id}: auto-generated {n} shots for {words}-word scene")
+    return warnings
 
 
 class ValidationFailed(RuntimeError):
@@ -608,8 +646,13 @@ async def run_story_engine(story_dir: Path, inp: StoryInput) -> Script:
         )
         text_part += _user_hint_block(inp)
         # hint-only boxes (no upload) have url="" — they feed the hint block
-        # above but must never reach the vision payload
-        vision_refs = [r for r in inp.reference_images if r.url]
+        # above but must never reach the vision payload.
+        # Vision sees ONLY the master (ref_front) image per asset: the other
+        # turnaround views belong to the image pipeline, and stacking them
+        # all (e.g. 3 chars x 6 views = 18 images) pushes the model's
+        # first-token latency past Cloudflare's ~100s cutoff -> HTTP 504.
+        vision_refs = [r for r in inp.reference_images
+                       if r.url and canonical_view(r.view) == "ref_front"][:8]
         if vision_refs:
             refs = "\n".join(
                 f'- {r.asset_hint} ({r.view} view'
@@ -693,6 +736,8 @@ async def run_story_engine(story_dir: Path, inp: StoryInput) -> Script:
     data = await _pass(story_dir, log, inp, "scenes", system, user,
                        temperature=0.4, max_tokens=max_tokens)
     script = Script.model_validate(data)
+    for w in normalize_script(script, bible):
+        log.event("story", "script_normalized", detail=w)
 
     errors = validate_script(script, bible, inp)
     if errors:
@@ -707,6 +752,8 @@ async def run_story_engine(story_dir: Path, inp: StoryInput) -> Script:
                            REPAIR_SYSTEM + "\n\nOriginal task:\n" + system,
                            repair_user, temperature=0.3, max_tokens=max_tokens)
         script = Script.model_validate(data)
+        for w in normalize_script(script, bible):
+            log.event("story", "script_normalized", detail=w)
         errors = validate_script(script, bible, inp)
         if errors:
             raise ValidationFailed(errors)

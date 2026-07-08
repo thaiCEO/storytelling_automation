@@ -97,10 +97,15 @@ class AtlasClient:
         *,
         temperature: float = 0.8,
         max_tokens: int = 8192,
-        timeout: float = 180,
+        timeout: float = 600,
     ) -> str:
-        """OpenAI-compatible chat. user_content may be a string or vision
-        content blocks ([{type:text},{type:image_url,...}])."""
+        """OpenAI-compatible chat, STREAMED. user_content may be a string or
+        vision content blocks ([{type:text},{type:image_url,...}]).
+
+        Streaming is required: long Sonnet generations (bible/scene passes)
+        exceed Atlas's HTTP gateway timeout on non-streaming requests and
+        come back as 504. With SSE the connection stays active per token;
+        `timeout` caps the whole call, 60s guards each inter-chunk gap."""
         payload = {
             "model": settings.llm_model,
             "messages": [
@@ -109,13 +114,59 @@ class AtlasClient:
             ],
             "temperature": temperature,
             "max_tokens": max_tokens,
+            "stream": True,
         }
-        resp = await self._request_with_retry("POST", CHAT_PATH, json=payload, timeout=timeout)
-        data = resp.json()
-        try:
-            return data["choices"][0]["message"]["content"]
-        except (KeyError, IndexError) as exc:
-            raise AtlasError(f"unexpected chat response shape: {str(data)[:500]}") from exc
+        last_exc: Exception | None = None
+        for attempt in range(MAX_RETRIES + 1):
+            try:
+                return await asyncio.wait_for(
+                    self._chat_stream_once(payload), timeout)
+            except (httpx.TimeoutException, httpx.TransportError,
+                    asyncio.TimeoutError, AtlasError) as exc:
+                last_exc = exc
+                if attempt < MAX_RETRIES:
+                    await asyncio.sleep(BACKOFF[attempt])
+            except httpx.HTTPStatusError as exc:  # 4xx — retrying won't help
+                raise AtlasError(
+                    f"{CHAT_PATH} -> HTTP {exc.response.status_code}: "
+                    f"{exc.response.text[:500]}") from exc
+        raise AtlasError(
+            f"{CHAT_PATH} failed after {MAX_RETRIES + 1} attempts: "
+            f"{type(last_exc).__name__}: {last_exc}")
+
+    async def _chat_stream_once(self, payload: dict) -> str:
+        parts: list[str] = []
+        async with self._client.stream(
+            "POST", CHAT_PATH, headers=_headers(), json=payload,
+            # per-chunk read guard: vision passes (bible with reference
+            # images) can take >60s before the FIRST token arrives
+            timeout=httpx.Timeout(180, connect=30),
+        ) as resp:
+            if resp.status_code >= 500 or resp.status_code == 429:
+                await resp.aread()
+                raise AtlasError(f"HTTP {resp.status_code}: {resp.text[:300]}")
+            if resp.status_code >= 400:
+                await resp.aread()
+                raise httpx.HTTPStatusError(
+                    "chat error", request=resp.request, response=resp)
+            async for line in resp.aiter_lines():
+                if not line.startswith("data:"):
+                    continue
+                data = line[5:].strip()
+                if data == "[DONE]":
+                    break
+                try:
+                    chunk = json.loads(data)
+                except json.JSONDecodeError:
+                    continue
+                choices = chunk.get("choices") or []
+                delta = (choices[0].get("delta") or {}) if choices else {}
+                content = delta.get("content")
+                if content:
+                    parts.append(content)
+        if not parts:
+            raise AtlasError("chat stream returned no content")
+        return "".join(parts)
 
     # -------------------------------------------------------- media (async)
     async def _poll_prediction(self, pred_id: str, *, timeout: float) -> dict:

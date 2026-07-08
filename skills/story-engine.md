@@ -13,7 +13,7 @@ full story in one call — quality collapses.
 
 ```json
 {
-  "topic": "string, required, 10–50 words, must contain a conflict",
+  "topic": "string, required, 10–400 words, must contain a conflict; long form = detailed synopsis the premise pass must preserve (named characters, plot points, ending)",
   "genre": "sci-fi | fantasy | horror | drama | thriller | mystery",
   "tone": "string (default: 'emotional, cinematic')",
   "target_audience": "string (default: '18-35 general')",
@@ -210,8 +210,11 @@ Output:
 4. Every `cast`/`location`/`props` ID exists in `bible.json`.
 5. No two consecutive close-ups; scene 1 camera ∈ {wide, aerial}.
 6. Audio tags only from the allowed list, ≤1 per scene.
-6b. Pacing: no scene > 90 words; any scene > 34 words needs 2-5 shots with
-   valid cameras and non-empty focus (one image per shot downstream).
+6b. Pacing: no scene > 90 words; shots must be ≤5 with valid cameras and
+   non-empty focus. A scene > 34 words that the LLM left shotless is
+   SOFT-FIXED by `normalize_script()` (story_engine.py) — code synthesizes
+   2-5 shots from the scene's camera/location_detail/cast/props and logs a
+   `script_normalized` warning; missing shots never fail the paid stage.
 7. On failure: send the validator's error list back to Sonnet with
    "Fix ONLY these issues, return the full corrected JSON." One retry max,
    then mark story `failed_validation` and surface to UI.

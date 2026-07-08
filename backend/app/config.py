@@ -30,6 +30,11 @@ class Settings(BaseSettings):
     hook_resolution: str = "720p"
     hook_bitrate_mode: str = "standard"
     hook_seed: int = -1
+    # "elevenlabs" = direct ElevenLabs SDK (clients/eleven.py);
+    # "atlas" = Atlas Cloud generateAudio with tts_model below
+    tts_provider: str = "atlas"
+    elevenlabs_api_key: str = ""
+    elevenlabs_model_id: str = "eleven_v3"
     tts_model: str = "xai/tts-v1"
     tts_voice_id: str = ""          # legacy single-voice fallback
     tts_voice_id_male: str = ""     # locked male brand voice

@@ -57,7 +57,7 @@ def test_flux_text_payload_uses_atlas_size_format(monkeypatch):
 
     assert atlas_model == "black-forest-labs/flux-schnell"
     assert aspect == "16:9"
-    assert payload["size"] == "1280*720"
+    assert payload["size"] == "1920*1080"  # native full HD, priced per run
     assert "quality" not in payload
     assert "input_fidelity" not in payload
 
@@ -74,11 +74,32 @@ def test_flux_edit_payload_uses_flux_2_pro_schema(monkeypatch):
 
     assert atlas_model == "black-forest-labs/flux-2-pro/edit"
     assert aspect == "9:16"
-    assert payload["size"] == "720*1280"
+    assert payload["size"] == "1080*1920"  # native full HD (max 2048/dim)
     assert payload["output_format"] == "png"
     assert len(payload["images"]) == 8
     assert "quality" not in payload
     assert "input_fidelity" not in payload
+
+
+def test_every_model_matches_video_format_geometry():
+    """youtube -> 16:9 (1920x1080-class), tiktok -> 9:16 (1080x1920-class)."""
+    fy, ft = images.FORMATS["youtube"], images.FORMATS["tiktok"]
+    assert (fy.width, fy.height) == (1920, 1080)
+    assert (ft.width, ft.height) == (1080, 1920)
+    assert images._flux_size(fy) == "1920*1080"
+    assert images._flux_size(ft) == "1080*1920"
+
+    for fmt, want_ar in ((fy, "16:9"), (ft, "9:16")):
+        for model in ("grok-imagine", "nano-banana-2"):
+            _, payload, aspect = images._payload(model, "p", [], fmt)
+            assert payload["aspect_ratio"] == want_ar
+            assert aspect == want_ar
+
+    # gpt-image-2 has no native 16:9/9:16 — nearest size, cropped at render
+    _, py, ay = images._payload("gpt-image-2", "p", [], fy)
+    _, pt, at = images._payload("gpt-image-2", "p", [], ft)
+    assert (py["size"], ay) == ("1536x1024", "3:2")
+    assert (pt["size"], at) == ("1024x1536", "2:3")
 
 
 def test_grok_text_payload(monkeypatch):

@@ -5,18 +5,34 @@ description: Generate per-scene English narration audio with the configured TTS 
 
 # Voice Pipeline (Stage 4)
 
-Converts each scene's `narration` into an MP3 with the configured TTS model
-(currently xAI TTS v1 by xAI), then measures **real duration** with ffprobe —
-the single source of truth for video timing.
+Converts each scene's `narration` into an MP3 with the configured TTS
+provider, then measures **real duration** with ffprobe — the single source
+of truth for video timing.
+
+## Provider selection (`TTS_PROVIDER` in .env)
+
+- `elevenlabs` (current) — the official `elevenlabs` Python SDK direct to
+  ElevenLabs (`clients/eleven.py`): `AsyncElevenLabs.text_to_speech.convert(
+  text, voice_id, model_id=ELEVENLABS_MODEL_ID, output_format=
+  "mp3_44100_128")`, own retry ×2 + 60s timeout wrapper. Needs
+  `ELEVENLABS_API_KEY`. Cost logs with PRICES["elevenlabs-direct"]
+  (subscription credits — indicative).
+- `atlas` (fallback) — Atlas Cloud `generateAudio` with `TTS_MODEL`
+  (payload shapes below).
 
 ## Voice rules
 
 - `TTS_VOICE_ID` / `TTS_VOICE_ID_MALE` / `TTS_VOICE_ID_FEMALE` in .env are the **locked brand voices**. Never change them per
   video; channel consistency depends on it. Pick once from the Voice Library
   matching `narrator_style` (e.g. deep, measured, documentary).
+- Current locked voices: MALE slot = Adam `pNInz6obpgDQGcFmaJgB` (default),
+  second ("FEMALE") slot = Chris `iP95p4xoKVk53GoZ742B` (both Male en-US —
+  the two slots are just the two UI picks; ElevenLabs premade ids work on
+  both providers).
 - Language: English narration is still the app contract (`language: "en"`).
-- Model: `TTS_MODEL=xai/tts-v1` with `TTS_VOICE_ID_FEMALE=Eve` for the current
-  female multilingual voice. Verify the exact Atlas model ID on the dashboard.
+- `ELEVENLABS_MODEL_ID=eleven_v3` — only the v3 family understands audio
+  tags; for any other model id `clients/eleven.py` strips ALL tags before
+  sending (older models read them aloud).
 
 ## Audio tags (already inserted by story engine)
 

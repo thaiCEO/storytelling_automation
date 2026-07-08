@@ -10,6 +10,7 @@ import json
 import re
 from pathlib import Path
 
+from ..clients import eleven
 from ..clients.atlas import atlas
 from ..config import settings
 from ..models import ALLOWED_AUDIO_TAGS, AudioManifestEntry, Scene, Script
@@ -102,10 +103,15 @@ async def _tts_one(scene: Scene, story_dir: Path, log: PipelineLog,
 
     if not out.exists():  # idempotent by file presence
         async with sem:
-            payload = build_tts_payload(text, voice_id)
-            content = await atlas.tts(payload, timeout=TIMEOUT)
+            if settings.tts_provider == "elevenlabs":  # direct SDK
+                content = await eleven.tts(text, voice_id)
+                price = PRICES["elevenlabs-direct"]
+            else:  # Atlas Cloud generateAudio
+                payload = build_tts_payload(text, voice_id)
+                content = await atlas.tts(payload, timeout=TIMEOUT)
+                price = PRICES.get(settings.tts_model, PRICES["elevenlabs-v3"])
             out.write_bytes(content)
-            usd = len(text) / 1000 * PRICES.get(settings.tts_model, PRICES["elevenlabs-v3"])
+            usd = len(text) / 1000 * price
             add_cost(story_dir, "tts", f"scene:{scene.id} chars:{len(text)}", usd)
             log.event("voice", "generated", detail=f"chars:{len(text)}",
                       scene_id=scene.id, cost_usd=usd)

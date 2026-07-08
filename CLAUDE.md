@@ -13,7 +13,7 @@ synced & rendered MP4.
 | AI Gateway | **Atlas Cloud** (single API key for all models) |
 | LLM (story engine) | Claude Sonnet via Atlas Cloud |
 | Image generation | User-selectable: GPT Image 2, Nano Banana 2, Flux Schnell, or auto-hybrid (see image-pipeline skill) |
-| Voice (TTS) | Configured TTS model (`xai/tts-v1` by default) |
+| Voice (TTS) | ElevenLabs SDK direct (`TTS_PROVIDER=elevenlabs`); Atlas fallback |
 | Video assembly | FFmpeg + ffprobe (installed on VPS) |
 | Storage | Local VPS filesystem `/stories/{story_id}/` (optionally R2/S3 later) |
 | Job status | Background tasks + SSE/polling from Nuxt progress page |
@@ -61,7 +61,7 @@ Rules for Claude when coding in this repo:
 ```env
 ATLAS_API_KEY=
 ATLAS_BASE_URL=https://api.atlascloud.ai
-LLM_MODEL=claude-sonnet            # via Atlas Cloud LLM endpoint
+LLM_MODEL=anthropic/claude-sonnet-4.6   # via Atlas Cloud LLM endpoint
 IMAGE_MODEL_GPT=openai/gpt-image-2/text-to-image
 IMAGE_EDIT_MODEL_GPT=openai/gpt-image-2/edit
 IMAGE_MODEL_NB2=google/nano-banana-2/text-to-image
@@ -70,10 +70,13 @@ IMAGE_EDIT_MODEL_FLUX=black-forest-labs/flux-2-pro/edit
 IMAGE_MODEL_DEFAULT=auto            # auto | gpt-image-2 | nano-banana-2 | flux-schnell (per-story override from UI)
 HOOK_VIDEO_MODEL=bytedance/seedance-2.0-mini/reference-to-video
 HOOK_DURATION_SEC=12                # used only when the per-story hook option is enabled
-TTS_MODEL=elevenlabs/v3/text-to-speech  # ElevenLabs v3 via Atlas ($0.003/1k chars)
+TTS_PROVIDER=elevenlabs            # elevenlabs (direct SDK) | atlas (generateAudio)
+ELEVENLABS_API_KEY=                # ElevenLabs account key (never commit)
+ELEVENLABS_MODEL_ID=eleven_v3      # v3 family = audio-tag support
+TTS_MODEL=elevenlabs/v3/text-to-speech  # used only when TTS_PROVIDER=atlas
 TTS_VOICE_ID=                      # LOCKED brand voice, never change per video
-TTS_VOICE_ID_MALE=iP95p4xoKVk53GoZ742B   # Chris (Male, en-US) — internal id, never the display name
-TTS_VOICE_ID_FEMALE=pNInz6obpgDQGcFmaJgB # Adam (Male, en-US) — second narrator slot
+TTS_VOICE_ID_MALE=pNInz6obpgDQGcFmaJgB   # Adam (Male, en-US) — internal id, never the display name
+TTS_VOICE_ID_FEMALE=iP95p4xoKVk53GoZ742B # Chris (Male, en-US) — second narrator slot
 STORIES_DIR=/var/www/story-automation/stories
 FFMPEG_BIN=ffmpeg
 FFPROBE_BIN=ffprobe

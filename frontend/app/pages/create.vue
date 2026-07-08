@@ -25,7 +25,7 @@ const form = reactive({
 })
 
 const wordCount = computed(() => form.topic.trim() ? form.topic.trim().split(/\s+/).length : 0)
-const topicValid = computed(() => wordCount.value >= 10 && wordCount.value <= 50)
+const topicValid = computed(() => wordCount.value >= 10 && wordCount.value <= 400)
 
 // live cost estimate — updates as slider or model change
 const estimate = ref<Estimate | null>(null)
@@ -56,8 +56,8 @@ const refNames = computed(() => refAssets.value.map(a => a.name))
 // two locked ElevenLabs v3 narrator voices — the internal "male"/"female"
 // keys are just the two slots; labels show the real voice names
 const voiceOptions = [
-  { value: 'male', label: 'Chris (Male, En-US)', emoji: '🧔' },
-  { value: 'female', label: 'Adam (Male, En-US)', emoji: '🧑' },
+  { value: 'male', label: 'Adam (Male, En-US)', emoji: '🧔' },
+  { value: 'female', label: 'Chris (Male, En-US)', emoji: '🧑' },
 ]
 const voiceLanguageLabel = 'English (EN)'
 const voiceLanguageDescription = 'Narration and AI voice are generated in English only.'
@@ -94,7 +94,7 @@ function hasPicture(a: RefAsset): boolean {
 }
 
 async function submit() {
-  if (!topicValid.value) { error.value = 'Topic must be 10–50 words.'; return }
+  if (!topicValid.value) { error.value = 'Topic must be 10–400 words.'; return }
   if (refAssets.value.some(a => !a.name.trim())) {
     error.value = 'Please give every reference box a name (e.g. KAIRA).'
     return
@@ -190,11 +190,11 @@ async function submit() {
       <textarea
         v-model="form.topic"
         rows="4"
-        placeholder="What is your story about? Give it a clear conflict… (10–50 words)"
+        placeholder="What is your story about? Give it a clear conflict — one line or a full synopsis… (10–400 words)"
         class="mt-4 w-full rounded-xl border border-zinc-700 bg-zinc-900 p-4 text-base placeholder:text-zinc-500 focus:border-amber-400 focus:outline-none"
       />
       <div class="mt-1 text-right text-xs" :class="topicValid ? 'text-emerald-400' : 'text-zinc-500'">
-        {{ wordCount }} / 10–50 words
+        {{ wordCount }} / 10–400 words
       </div>
     </section>
 

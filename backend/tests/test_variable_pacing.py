@@ -3,7 +3,7 @@ import pytest
 from app.models import Asset, Bible, CharacterAsset, Scene, Script, Shot, StoryInput
 from app.pipeline.images import build_prompt, scene_shot_list, _generate_one
 from app.pipeline.render import CF_FRAMES, _shot_frames
-from app.pipeline.story_engine import validate_script
+from app.pipeline.story_engine import normalize_script, validate_script
 from app.utils.log import PipelineLog
 
 
@@ -29,19 +29,38 @@ def _scene(id=1, words=20, camera="wide", shots=None) -> Scene:
                  time_of_day="dawn", weather="mist", shots=shots or [])
 
 
-def test_deep_scene_without_shots_fails_validation():
-    script = Script(scenes=[_scene(1, words=50)])
+def test_normalize_script_synthesizes_missing_shots():
+    """A long scene the LLM left shotless gets code-made shots (soft-fix,
+    never a hard failure of the paid story stage)."""
+    scene = _scene(1, words=50, camera="wide")
+    scene.location_detail = "crater rim"
+    scene.props = []
+    script = Script(scenes=[scene])
+    warnings = normalize_script(script, _bible())
+
+    assert warnings and "auto-generated" in warnings[0]
+    assert 2 <= len(scene.shots) <= 5
+    assert scene.shots[0].camera == "wide"          # opens on the scene camera
+    assert scene.shots[0].focus == "crater rim"
+    assert scene.shots[1].focus == "A's face and reaction"  # cast close-up
+    # cameras vary shot to shot
+    assert scene.shots[1].camera != scene.shots[0].camera
+    # and validation passes afterwards
     errors = validate_script(script, _bible(), _inp())
-    assert any("needs \"shots\"" in e for e in errors)
+    assert not any("shots" in e for e in errors)
 
 
-def test_deep_scene_with_shots_passes_shot_rule():
+def test_normalize_script_leaves_good_scenes_alone():
     shots = [Shot(camera="wide", focus="the crater rim"),
              Shot(camera="close-up", focus="trembling hands"),
              Shot(camera="detail", focus="the glowing stone")]
-    script = Script(scenes=[_scene(1, words=50, shots=shots)])
+    deep_ok = _scene(1, words=50, shots=shots)
+    short = _scene(2, words=20)
+    script = Script(scenes=[deep_ok, short])
+    assert normalize_script(script, _bible()) == []
+    assert deep_ok.shots == shots
+    assert short.shots == []
     errors = validate_script(script, _bible(), _inp())
-    assert not any("needs \"shots\"" in e for e in errors)
     assert not any("unknown camera" in e for e in errors)
 
 
